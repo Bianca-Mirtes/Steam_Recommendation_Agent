@@ -47,17 +47,11 @@ def main():
         games_df,
         output_dir="data/embeddings",
         numeric_features=numeric_features,
-        use_hybrid=True
+        use_hybrid=False
     )
     
-    # Verificar qual tipo de embedding foi criado
-    if 'hybrid_embeddings' in embed_result:
-        embeddings = embed_result['hybrid_embeddings']
-        print(f"   • Embeddings híbridos: {embeddings.shape}")
-    else:
-        embeddings = embed_result['text_embeddings']
-        print(f"   • Embeddings de texto: {embeddings.shape}")
-    
+    embeddings = embed_result['text_embeddings']
+    print(f"   • Embeddings de texto: {embeddings.shape}")
     print(f"   • Índice FAISS: {index.ntotal} vetores")
     
     # 4. Treinar modelo colaborativo (ProfileAnalyzer)

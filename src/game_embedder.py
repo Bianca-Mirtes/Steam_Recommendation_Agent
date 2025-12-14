@@ -33,6 +33,7 @@ class GameEmbedder:
         self.embedding_cache = {}
         self.game_id_to_idx = {}  # Mapeamento appid -> índice
         self.idx_to_game_id = {}  # Mapeamento índice -> appid
+        self.faiss_index = None
         
     def create_game_embeddings(self, games_df, text_column='combined_text', batch_size=32):
         """
@@ -97,91 +98,6 @@ class GameEmbedder:
             'idx_to_game_id': self.idx_to_game_id
         }
     
-    def create_hybrid_embeddings(self, games_df, text_column='combined_text', 
-                               numeric_features=None, weight_text=0.7, weight_numeric=0.3):
-        """
-        Cria embeddings híbridos combinando texto e features numéricas
-        
-        Args:
-            games_df: DataFrame com jogos
-            text_column: Coluna com texto
-            numeric_features: Lista de colunas numéricas para incluir
-            weight_text: Peso para embeddings de texto
-            weight_numeric: Peso para features numéricas
-            
-        Returns:
-            Dict com embeddings híbridos
-        """
-        if 'appid' not in games_df.columns:
-            raise ValueError("DataFrame deve conter coluna 'appid'")
-        
-        # 1. Criar embeddings de texto
-        text_result = self.create_game_embeddings(games_df, text_column)
-        text_embeddings = text_result['text_embeddings']
-        game_ids = text_result['game_ids']
-        
-        # 2. Extrair features numéricas
-        numeric_vectors = []
-        if numeric_features:
-            for game_id in game_ids:
-                game_data = games_df[games_df['appid'] == game_id].iloc[0]
-                numeric_vec = []
-                for feat in numeric_features:
-                    if feat in game_data:
-                        val = float(game_data[feat])
-                        numeric_vec.append(val)
-                    else:
-                        numeric_vec.append(0.0)
-                numeric_vectors.append(numeric_vec)
-            
-            numeric_vectors = np.array(numeric_vectors)
-            
-            # Normalizar features numéricas
-            from sklearn.preprocessing import StandardScaler
-            scaler = StandardScaler()
-            numeric_vectors = scaler.fit_transform(numeric_vectors)
-            
-            # 3. Combinar embeddings
-            # Normalizar pesos
-            total_weight = weight_text + weight_numeric
-            weight_text_norm = weight_text / total_weight
-            weight_numeric_norm = weight_numeric / total_weight
-            
-            # Redimensionar para combinar
-            if text_embeddings.shape[1] != numeric_vectors.shape[1]:
-                # Usar PCA para reduzir dimensão do texto se necessário
-                from sklearn.decomposition import PCA
-                n_numeric_features = numeric_vectors.shape[1]
-                pca = PCA(n_components=n_numeric_features)
-                text_reduced = pca.fit_transform(text_embeddings)
-                
-                # Combinar
-                hybrid_embeddings = (
-                    weight_text_norm * text_reduced + 
-                    weight_numeric_norm * numeric_vectors
-                )
-            else:
-                # Mesma dimensão, combinar diretamente
-                hybrid_embeddings = (
-                    weight_text_norm * text_embeddings + 
-                    weight_numeric_norm * numeric_vectors
-                )
-            
-            logger.info(f"Embeddings híbridos criados: {hybrid_embeddings.shape}")
-            
-            # Atualizar cache
-            for i, game_id in enumerate(game_ids):
-                self.embedding_cache[game_id]['hybrid_embedding'] = hybrid_embeddings[i]
-            
-            return {
-                'hybrid_embeddings': hybrid_embeddings,
-                'game_ids': game_ids,
-                'text_embeddings': text_embeddings,
-                'numeric_vectors': numeric_vectors
-            }
-        
-        return text_result
-    
     def build_faiss_index(self, embeddings, index_type="IVFFlat", nlist=100, metric='l2'):
         """
         Constrói índice FAISS para busca eficiente
@@ -237,6 +153,8 @@ class GameEmbedder:
         
         logger.info(f"Índice FAISS construído: {index.ntotal} vetores")
         logger.info(f"Parâmetros: tipo={index_type}, métrica={metric}, nprobe={index.nprobe if hasattr(index, 'nprobe') else 'N/A'}")
+
+        self.faiss_index = index
         
         return index
     
@@ -295,6 +213,10 @@ class GameEmbedder:
         # Garantir shape correto
         if len(query_embedding.shape) == 1:
             query_embedding = query_embedding.reshape(1, -1)
+
+                # Verificar se a dimensão do embedding da query é igual à dimensão do índice
+        if query_embedding.shape[1] != index.d:
+            raise ValueError(f"Dimensão do embedding da query ({query_embedding.shape[1]}) não coincide com a dimensão do índice ({index.d})")
         
         # Buscar mais resultados para depois filtrar
         search_k = min(top_k * 5, index.ntotal)
@@ -314,11 +236,8 @@ class GameEmbedder:
                 
                 game_info = game_data.iloc[0]
                 
-                # FAZER: Converter para similaridade baseada na métrica
-                if metric == 'l2':
-                    similarity = 1 / (1 + distance)  # Converte para 0-1
-                else:
-                    similarity = 1 - distance  # Cosine similarity
+                # similaridade baseada na métrica l2 (padrão do FAISS)
+                similarity = 1 / (1 + distance)  # Converte para 0-1
                 
                 # BOOST para jogos populares
                 if 'positive_ratings' in game_info:
@@ -500,6 +419,9 @@ class GameEmbedder:
         self.game_id_to_idx = data['game_id_to_idx']
         self.idx_to_game_id = data['idx_to_game_id']
         
+        faiss_index = faiss.read_index(f"{save_dir}/game_index.faiss")
+        self.faiss_index = faiss_index
+        
         logger.info(f"Dados carregados: {len(self.embedding_cache)} jogos")
     
     def get_game_embedding(self, game_id, embedding_type='text'):
@@ -528,7 +450,7 @@ class GameEmbedder:
 
 # Função utilitária para criar embeddings completo
 def create_game_embeddings_pipeline(games_df, output_dir="embeddings", 
-                                  numeric_features=None, use_hybrid=True):
+                                  numeric_features=None, use_hybrid=False):
     """
     Pipeline completo para criação de embeddings
     

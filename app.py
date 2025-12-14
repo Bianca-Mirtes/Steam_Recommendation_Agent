@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import json
 import pickle
+import faiss
 
 # Adicionar src ao path
 sys.path.append(str(Path(__file__).parent / "src"))
@@ -48,6 +49,20 @@ st.markdown("""
         border-radius: 15px;
         margin-bottom: 1rem;
     }
+    .library-recommendation {
+        background: linear-gradient(135deg, #4CAF50 0%, #2E7D32 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 15px;
+        margin-bottom: 1rem;
+    }
+    .dataset-recommendation {
+        background: linear-gradient(135deg, #2196F3 0%, #1976D2 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 15px;
+        margin-bottom: 1rem;
+    }
     .metric-card {
         background-color: white;
         padding: 1rem;
@@ -61,6 +76,14 @@ st.markdown("""
         border: none;
         padding: 0.5rem 2rem;
         border-radius: 25px;
+        font-weight: bold;
+    }
+    .hours-badge {
+        background-color: #FF9800;
+        color: white;
+        padding: 0.2rem 0.5rem;
+        border-radius: 10px;
+        font-size: 0.8rem;
         font-weight: bold;
     }
 </style>
@@ -77,13 +100,6 @@ with st.sidebar:
     
     st.markdown("### ⚙️ Configurações")
     
-    # Estratégia de recomendação
-    strategy = st.selectbox(
-        "Estratégia de Recomendação",
-        ["Híbrida", "Colaborativa", "Baseada em Conteúdo", "Contextual"],
-        help="Híbrida combina todas as abordagens"
-    )
-    
     # Número de recomendações
     n_recommendations = st.slider(
         "Número de Recomendações",
@@ -91,6 +107,23 @@ with st.sidebar:
         max_value=10,
         value=5
     )
+    
+    # Configurações da biblioteca
+    with st.expander("📚 Configurações da Biblioteca"):
+        max_library_hours = st.slider(
+            "Máximo de horas para considerar 'não jogado'",
+            min_value=0.5,
+            max_value=10.0,
+            value=3.0,
+            step=0.5,
+            help="Jogos com menos horas que esta serão considerados da biblioteca"
+        )
+        
+        prioritize_library = st.checkbox(
+            "Priorizar jogos da biblioteca",
+            value=True,
+            help="Buscar primeiro na sua biblioteca antes de recomendar novos jogos"
+        )
     
     # Configurações avançadas
     with st.expander("⚙️ Configurações Avançadas"):
@@ -146,12 +179,7 @@ def load_models():
         # Carregar embeddings
         from src.game_embedder import GameEmbedder
         embedder = GameEmbedder()
-        # Carregar embeddings e índice (usando o novo formato)
         embedder.load_all("data/embeddings")
-        
-        # Carregar índice FAISS
-        import faiss
-        faiss_index = faiss.read_index("data/embeddings/game_index.faiss")
         
         # Carregar modelo de perfil
         from src.profile_analyzer import ProfileAnalyzer
@@ -163,24 +191,17 @@ def load_models():
         from src.prompt_interpreter import PromptInterpreter
         interpreter = PromptInterpreter()
         
-        # Carregar agente
-        from src.agent_orchestrator import RecommendationAgent, RecommendationStrategy
-        from enum import Enum
+        # Carregar API da Steam
+        from src.steam_api_client import SteamAPI
+        steam_api = SteamAPI()
         
-        # Mapear estratégia
-        strategy_map = {
-            "Híbrida": RecommendationStrategy.HYBRID,
-            "Colaborativa": RecommendationStrategy.COLLABORATIVE,
-            "Baseada em Conteúdo": RecommendationStrategy.CONTENT_BASED,
-            "Contextual": RecommendationStrategy.CONTEXTUAL
-        }
+        # Carregar AGENTE SIMPLIFICADO
+        from src.agent import ImprovedRecommendationAgent
         
-        agent = RecommendationAgent(
-            profile_analyzer=analyzer,
-            game_embedder=embedder,
+        agent = ImprovedRecommendationAgent(
             prompt_interpreter=interpreter,
             games_df=games_df,
-            strategy=strategy_map[strategy]
+            steam_api=steam_api
         )
         
         return {
@@ -188,40 +209,31 @@ def load_models():
             'embedder': embedder,
             'analyzer': analyzer,
             'interpreter': interpreter,
-            'agent': agent,
-            'faiss_index': faiss_index
+            'steam_api': steam_api,
+            'agent': agent
         }
     except Exception as e:
         st.error(f"Erro ao carregar modelos: {e}")
-        return None
-
-# Usar session_state para manter um contador único
-if 'widget_counter' not in st.session_state:
-    st.session_state.widget_counter = 0
 
 def create_user_profile_form():
     st.markdown('<h3 class="sub-header">🔗 Conectar à Sua Conta Steam</h3>', 
                 unsafe_allow_html=True)
     
-    # Container principal
     with st.container():
         col1, col2 = st.columns([3, 1])
         
         with col1:
-            # Usar instance_id para tornar a chave única
             steam_input = st.text_input(
                 "Digite seu SteamID, Vanity URL ou URL do perfil:",
                 value=st.session_state.get('steam_input', ''),
                 placeholder="Ex: 76561197960287930 ou https://steamcommunity.com/id/seunome",
                 help="Você pode encontrar seu SteamID em https://steamid.io/",
-                key="steam_input_field"  # Chave única
+                key="steam_input_field"
             )
             
-            # Atualizar session_state
             if steam_input != st.session_state.get('steam_input', ''):
                 st.session_state.steam_input = steam_input
             
-            # Exemplos clicáveis
             st.caption("💡 Exemplos: `76561197960287930` ou `https://steamcommunity.com/id/gabeloganneweller`")
         
         with col2:
@@ -231,15 +243,13 @@ def create_user_profile_form():
                 type="primary",
                 use_container_width=True,
                 disabled=not steam_input,
-                key="connect_button"  # Chave única
+                key="connect_button"
             )
     
-    # Se clicou para conectar
     if connect_button and steam_input:
         st.info(f"🔍 Tentando conectar com: {steam_input}")
         result = process_steam_connection(steam_input)
         
-        # DEBUG
         if result:
             st.success("✅ Perfil obtido com sucesso!")
         else:
@@ -247,7 +257,6 @@ def create_user_profile_form():
             
         return result
 
-    # Mostrar instruções se ainda não tentou conectar
     if not st.session_state.get('form_submitted', False):
         show_instructions()
 
@@ -267,11 +276,9 @@ def show_instructions():
 
 def process_steam_connection(steam_input):
     """Processa a conexão com a Steam"""
-    # Importar API
     try:
         from src.steam_api_client import SteamAPI, analyze_gaming_profile
         
-        # Status visual
         status_placeholder = st.empty()
         progress_bar = st.progress(0)
         
@@ -279,7 +286,7 @@ def process_steam_connection(steam_input):
         status_placeholder.markdown("**🔐 Conectando ao servidor Steam...**")
         progress_bar.progress(10)
         
-        steam_api = SteamAPI()  # Usa API key configurada automaticamente
+        steam_api = SteamAPI()
         
         # Etapa 2: Processar input do usuário
         status_placeholder.markdown("**🔍 Identificando seu perfil...**")
@@ -328,16 +335,27 @@ def process_steam_connection(steam_input):
         # Mostrar boas-vindas personalizada
         st.success(f"✨ **Bem-vindo(a), {player_data['personaname']}!**")
         
-        # Preparar dados para o modelo de recomendação
-        # Agora usando appid (números) em vez de nomes
-        library_appids = [game['appid'] for game in games_data['games'][:150]]  # Limitar para performance
-        
+        # Preparar dados da biblioteca com informações completas
+        library_with_details = []
         playtimes_dict = {}
-        for game in games_data['games'][:100]:  # Top 100 jogos
-            if game['playtime_forever'] > 0:
-                playtimes_dict[game['appid']] = game['playtime_forever'] // 60
         
-        # Retornar perfil completo
+        for game in games_data['games']:
+            playtime_hours = game.get('playtime_forever', 0) / 60
+            library_with_details.append({
+                'appid': game['appid'],
+                'name': game.get('name', 'Desconhecido'),
+                'playtime_minutes': game.get('playtime_forever', 0),
+                'playtime_hours': playtime_hours
+            })
+            
+            if playtime_hours > 0:
+                playtimes_dict[game['appid']] = playtime_hours
+        
+        # Contar jogos com menos de 3 horas
+        games_under_3h = sum(1 for game in library_with_details 
+                           if game['playtime_hours'] < 3)
+        
+        # Preparar perfil completo
         user_profile = {
             'user_id': steam_id,
             'persona_name': player_data['personaname'],
@@ -346,11 +364,13 @@ def process_steam_connection(steam_input):
             'playstyle': profile_analysis['playstyle'],
             'avg_playtime': games_data['total_playtime_hours'] / max(games_data['game_count'], 1),
             'favorite_genre': profile_analysis['preferred_genres'],
-            'user_library': library_appids,  # Agora é lista de appids
-            'playtimes': playtimes_dict,     # Agora mapeia appid -> horas
+            'user_library': [game['appid'] for game in games_data['games']],
+            'library_details': library_with_details,  # Informações detalhadas
+            'playtimes': playtimes_dict,
             'total_hours': games_data['total_playtime_hours'],
             'game_count': games_data['game_count'],
-            'profile_data': player_data  # Dados brutos para referência
+            'games_under_3h': games_under_3h,
+            'profile_data': player_data
         }
 
         # Mostrar resumo do perfil
@@ -362,7 +382,6 @@ def process_steam_connection(steam_input):
         return user_profile
 
     except ValueError as e:
-        # Erro de API key não configurada
         st.error(f"❌ {str(e)}")
         st.session_state.form_submitted = False
         st.info("""
@@ -380,10 +399,10 @@ def process_steam_connection(steam_input):
         return get_fallback_profile()
 
 def show_profile_summary(user_profile, games_data, profile_analysis):
-    # Seção de resumo do perfil
+    """Mostra resumo do perfil do usuário"""
     with st.expander(f"👤 Seu Perfil Steam - {user_profile['persona_name']}", expanded=True):
         # Métricas
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             st.metric("🎮 Jogos", games_data['game_count'])
@@ -400,50 +419,9 @@ def show_profile_summary(user_profile, games_data, profile_analysis):
             st.markdown("**🌟 Seus Gêneros Preferidos:**")
             tags = " ".join([f"`{genre}`" for genre in profile_analysis['preferred_genres'][:5]])
             st.markdown(tags)
-        
-        # Top jogos
-        st.markdown("**🏆 Seus Jogos Mais Jogados:**")
-        
-        # Preparar top jogos
-        top_games = []
-        for game in games_data['games'][:10]:  # Top 10
-            if game['playtime_forever'] > 0:
-                hours = game['playtime_forever'] // 60
-                top_games.append({
-                    'name': game['name'],
-                    'hours': hours
-                })
-        
-        # Ordenar por horas
-        top_games.sort(key=lambda x: x['hours'], reverse=True)
-        
-        # Mostrar como gráfico de barras
-        if top_games:
-            import plotly.express as px
-            top_df = pd.DataFrame(top_games[:5])
-            
-            fig = px.bar(
-                top_df,
-                x='hours',
-                y='name',
-                orientation='h',
-                title='Top 5 Jogos por Tempo',
-                color='hours',
-                color_continuous_scale='Blues'
-            )
-            
-            fig.update_layout(
-                height=300,
-                showlegend=False,
-                yaxis_title="",
-                xaxis_title="Horas Jogadas"
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
 
 def get_fallback_profile(steam_id=None, player_data=None):
     """Retorna um perfil de demonstração quando a API falha"""
-    # Usando appids reais em vez de nomes
     fallback_appids = [
         730,    # Counter-Strike 2
         570,    # Dota 2
@@ -457,22 +435,32 @@ def get_fallback_profile(steam_id=None, player_data=None):
         10,     # Counter-Strike
     ]
     
+    library_details = [
+        {'appid': 730, 'name': 'Counter-Strike 2', 'playtime_hours': 0.5},
+        {'appid': 570, 'name': 'Dota 2', 'playtime_hours': 1.2},
+        {'appid': 271590, 'name': 'GTA V', 'playtime_hours': 2.8},
+        {'appid': 292030, 'name': 'The Witcher 3', 'playtime_hours': 0.0},
+        {'appid': 413150, 'name': 'Stardew Valley', 'playtime_hours': 1.5},
+    ]
+    
     return {
         'user_id': steam_id or 'user_demo',
         'persona_name': player_data['personaname'] if player_data else 'Demo User',
         'playstyle': 'Moderado',
         'avg_playtime': 15,
         'favorite_genre': ['Action', 'Adventure'],
-        'user_library': fallback_appids,  # Lista de appids
+        'user_library': fallback_appids,
+        'library_details': library_details,
         'playtimes': {
-            730: 350,    # Counter-Strike 2
-            570: 220,    # Dota 2
-            271590: 85,  # GTA V
-            292030: 120, # The Witcher 3
-            413150: 65,  # Stardew Valley
+            730: 0.5,
+            570: 1.2,
+            271590: 2.8,
+            292030: 0.0,
+            413150: 1.5,
         },
         'total_hours': 1500,
-        'game_count': 50
+        'game_count': 50,
+        'games_under_3h': 5
     }
 
 def display_recommendation_metrics(recommendations):
@@ -482,6 +470,9 @@ def display_recommendation_metrics(recommendations):
     
     # Garantir que scores são numéricos
     scores = []
+    library_count = 0
+    dataset_count = 0
+    
     for rec in recommendations:
         score = rec.score
         if isinstance(score, str):
@@ -492,8 +483,11 @@ def display_recommendation_metrics(recommendations):
         elif not isinstance(score, (int, float, np.number)):
             score = 0.0
         scores.append(score)
-
-    sources = [rec.source for rec in recommendations]
+        
+        if rec.source == "user_library":
+            library_count += 1
+        else:
+            dataset_count += 1
     
     col1, col2, col3, col4 = st.columns(4)
     
@@ -507,25 +501,24 @@ def display_recommendation_metrics(recommendations):
     
     with col2:
         st.markdown(f'<div class="metric-card">'
-                   f'<h3>🎯</h3>'
-                   f'<h4>{len(recommendations)}</h4>'
-                   f'<p>Recomendações</p>'
+                   f'<h3>📚</h3>'
+                   f'<h4>{library_count}</h4>'
+                   f'<p>Da sua biblioteca</p>'
                    f'</div>', unsafe_allow_html=True)
     
     with col3:
-        unique_sources = len(set(sources))
         st.markdown(f'<div class="metric-card">'
-                   f'<h3>🔄</h3>'
-                   f'<h4>{unique_sources}</h4>'
-                   f'<p>Fontes</p>'
+                   f'<h3>🛒</h3>'
+                   f'<h4>{dataset_count}</h4>'
+                   f'<p>Novos jogos</p>'
                    f'</div>', unsafe_allow_html=True)
     
     with col4:
-        diversity = 1.0 if len(set(sources)) > 1 else 0.0
+        total_recs = len(recommendations)
         st.markdown(f'<div class="metric-card">'
-                   f'<h3>🌈</h3>'
-                   f'<h4>{diversity:.1f}</h4>'
-                   f'<p>Diversidade</p>'
+                   f'<h3>🎯</h3>'
+                   f'<h4>{total_recs}</h4>'
+                   f'<p>Total</p>'
                    f'</div>', unsafe_allow_html=True)
 
 def visualize_recommendations(recommendations):
@@ -534,14 +527,42 @@ def visualize_recommendations(recommendations):
         return
     
     # Criar DataFrame para visualização
-    df = pd.DataFrame([{
-        'name': rec.game_name,
-        'score': rec.score,
-        'source': rec.source,
-        'game_id': rec.game_id
-    } for rec in recommendations])
+    data = []
+    for rec in recommendations:
+        playtime = None
+        if rec.source == "user_library" and 'playtime_hours' in rec.metadata:
+            playtime = rec.metadata['playtime_hours']
+        
+        data.append({
+            'name': rec.game_name,
+            'score': rec.score,
+            'source': rec.source,
+            'playtime_hours': playtime,
+            'game_id': rec.game_id
+        })
     
-    # Gráfico de barras
+    df = pd.DataFrame(data)
+    
+    # Gráfico de barras por fonte
+    source_counts = df['source'].value_counts().reset_index()
+    source_counts.columns = ['Fonte', 'Quantidade']
+    
+    fig_source = px.pie(
+        source_counts,
+        values='Quantidade',
+        names='Fonte',
+        title='📊 Distribuição por Fonte',
+        color='Fonte',
+        color_discrete_map={
+            'user_library': '#4CAF50',
+            'dataset_fallback': '#2196F3',
+            'popular_fallback': '#FF9800'
+        }
+    )
+    
+    fig_source.update_layout(height=400)
+    
+    # Gráfico de barras de scores
     fig_bar = px.bar(
         df,
         x='name',
@@ -549,7 +570,11 @@ def visualize_recommendations(recommendations):
         color='source',
         title='📈 Scores das Recomendações',
         labels={'name': 'Jogo', 'score': 'Score', 'source': 'Fonte'},
-        color_discrete_sequence=px.colors.qualitative.Set3
+        color_discrete_map={
+            'user_library': '#4CAF50',
+            'dataset_fallback': '#2196F3',
+            'popular_fallback': '#FF9800'
+        }
     )
     
     fig_bar.update_layout(
@@ -558,47 +583,12 @@ def visualize_recommendations(recommendations):
         showlegend=True
     )
     
-    # Gráfico de radar (apenas se houver features)
-    try:
-        features_list = []
-        for rec in recommendations:
-            if hasattr(rec, 'match_features'):
-                features_list.append({
-                    'name': rec.game_name,
-                    **rec.match_features
-                })
-        
-        if features_list:
-            features_df = pd.DataFrame(features_list)
-            numeric_cols = features_df.select_dtypes(include=[np.number]).columns
-            
-            if len(numeric_cols) >= 3:
-                fig_radar = go.Figure()
-                
-                for i, row in features_df.iterrows():
-                    fig_radar.add_trace(go.Scatterpolar(
-                        r=[row[col] for col in numeric_cols[:5]],
-                        theta=numeric_cols[:5],
-                        fill='toself',
-                        name=row['name']
-                    ))
-                
-                fig_radar.update_layout(
-                    polar=dict(
-                        radialaxis=dict(
-                            visible=True,
-                            range=[0, 1]
-                        )),
-                    showlegend=True,
-                    title='📊 Análise de Features',
-                    height=500
-                )
-                
-                st.plotly_chart(fig_radar, use_container_width=True)
-    except:
-        pass
-    
-    st.plotly_chart(fig_bar, use_container_width=True)
+    # Exibir gráficos
+    col1, col2 = st.columns(2)
+    with col1:
+        st.plotly_chart(fig_source, use_container_width=True)
+    with col2:
+        st.plotly_chart(fig_bar, use_container_width=True)
 
 def main():
     """Função principal da aplicação"""  
@@ -616,6 +606,10 @@ def main():
             if models:
                 st.session_state.models = models
                 st.session_state.models_loaded = True
+                
+                # Verificar se estamos usando agente antigo
+                if models.get('using_old_agent', False):
+                    st.warning("⚠️ Usando agente antigo. Execute o pipeline de dados completo para habilitar a busca na biblioteca.")
             else:
                 st.error("Sistema não inicializado. Execute `python main.py` primeiro.")
                 return
@@ -660,7 +654,8 @@ def main():
         with tab1:
             st.markdown('<h2 class="sub-header">🎮 Obter Recomendações</h2>', 
                     unsafe_allow_html=True)
-                    # Em vez disso, mostrar informações do usuário já conectado
+            
+            # Mostrar informações do usuário
             with st.expander("👤 Seu Perfil Steam", expanded=False):
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -670,6 +665,12 @@ def main():
                         st.metric("⏱️ Horas", f"{user_profile['total_hours']:,}")
                 with col3:
                     st.metric("🎯 Estilo", user_profile.get('playstyle', 'Moderado'))
+
+                # Gêneros favoritos
+                if user_profile['favorite_genre']:
+                    st.markdown("**🌟 Seus Gêneros Preferidos:**")
+                    tags = " ".join([f"`{genre}`" for genre in user_profile['favorite_genre'][:5]])
+                    st.markdown(tags)
                 
                 # Botão para reconectar se necessário
                 if st.button("🔁 Reconectar à Steam", key="reconnect_button"):
@@ -685,7 +686,7 @@ def main():
             with col1:
                 prompt = st.text_area(
                     "Descreva o que está procurando:",
-                    value="Quero um jogo relaxante para jogar por 1 hora, singleplayer, com boa história",
+                    value="Quero um jogo relaxante singleplayer e com boa história",
                     height=100,
                     help="Seja específico! Ex: 'jogo competitivo rápido para jogar com amigos'"
                 )
@@ -704,8 +705,7 @@ def main():
                     "Jogo de estratégia complexo para jogar nas férias",
                     "Algo rápido e casual para jogar no intervalo do trabalho",
                     "RPG com mundo aberto e muita exploração",
-                    "Jogo cooperativo para jogar com amigos online",
-                    "Algo desafiador que me faça pensar"
+                    "Jogo cooperativo para jogar com amigos online"
                 ]
                 
                 for example in examples:
@@ -721,12 +721,24 @@ def main():
             if generate_button and prompt and user_profile['user_library']:
                 with st.spinner("🤖 Analisando seu perfil e gerando recomendações..."):
                     try:
-                        recommendations = models['agent'].recommend(
-                            user_profile=user_profile,
-                            user_prompt=prompt,
-                            user_library=user_profile['user_library'],
-                            n_recommendations=n_recommendations
-                        )
+                        # Verificar se estamos usando o novo agente
+                        if hasattr(models['agent'], 'recommend_from_prompt'):
+                            # USAR NOVO AGENTE (EnhancedRecommendationAgent)
+                            recommendations = models['agent'].recommend_from_prompt(
+                                user_id=user_profile['user_id'],
+                                user_prompt=prompt,
+                                n_recommendations=n_recommendations
+                            )
+                        else:
+                            # USAR AGENTE ANTIGO (fallback)
+                            st.warning("⚠️ Usando sistema de recomendação antigo. A busca na biblioteca não está disponível.")
+                            recommendations = models['agent'].recommend(
+                                user_profile=user_profile,
+                                user_prompt=prompt,
+                                user_library=user_profile['user_library'],
+                                n_recommendations=n_recommendations
+                            )
+                        
                         # Exibir métricas
                         display_recommendation_metrics(recommendations)
                         
@@ -736,19 +748,43 @@ def main():
                         
                         # Exibir cada recomendação
                         for i, rec in enumerate(recommendations, 1):
+                            # Determinar cor baseada na fonte
+                            if rec.source == "user_library":
+                                card_class = "library-recommendation"
+                                source_badge = "📚 Da sua biblioteca"
+                            elif rec.source == "dataset_fallback":
+                                card_class = "dataset-recommendation"
+                                source_badge = "🛒 Novo jogo"
+                            else:
+                                card_class = "recommendation-card"
+                                source_badge = f"🎯 {rec.source}"
+                            
+                            # Criar card expansível
                             with st.expander(f"#{i} - {rec.game_name} (Score: {rec.score:.2f})", 
                                             expanded=(i == 1)):
+                                
+                                # Mostrar badge de fonte
                                 col1, col2 = st.columns([3, 1])
                                 
                                 with col1:
+                                    st.markdown(f"**{source_badge}**")
+                                    
+                                    # Mostrar horas jogadas se for da biblioteca
+                                    if rec.source == "user_library" and 'playtime_hours' in rec.metadata:
+                                        hours = rec.metadata['playtime_hours']
+                                        if hours == 0:
+                                            st.markdown("⏳ **Você ainda não jogou este jogo!**")
+                                        else:
+                                            st.markdown(f"⏱️ **Você jogou apenas {hours:.1f} horas**")
+                                    
                                     st.markdown(f"**🎯 Por que recomendamos:**")
                                     st.markdown(f"> {rec.rationale}")
                                     
                                     # Features de match
-                                    if rec.match_features:
+                                    if rec.metadata:
                                         st.markdown("**🔍 Match Features:**")
                                         features_html = ""
-                                        for feature, value in rec.match_features.items():
+                                        for feature, value in rec.metadata.items():
                                             if isinstance(value, (int, float)):
                                                 features_html += f"- `{feature}`: {value:.2f}<br>"
                                         st.markdown(features_html, unsafe_allow_html=True)
@@ -757,6 +793,7 @@ def main():
                                     st.markdown("**📊 Detalhes:**")
                                     st.markdown(f"- **Fonte:** {rec.source}")
                                     st.markdown(f"- **ID:** {rec.game_id}")
+                                    st.markdown(f"- **Score:** {rec.score:.2f}")
                                     
                                     # Botão de mais informações
                                     if st.button("📖 Mais info", key=f"more_info_{i}"):
@@ -767,22 +804,28 @@ def main():
                                     st.markdown("**📈 Análise Detalhada:**")
                                     
                                     # Criar gráfico de score
-                                    if 'score_components' in rec.metadata:
-                                        scores = rec.metadata['score_components']
-                                        fig = go.Figure(data=[
-                                            go.Bar(
-                                                x=[f"Componente {j+1}" for j in range(len(scores))],
-                                                y=scores,
-                                                marker_color='lightblue'
+                                    if 'metadata' in rec.__dict__:
+                                        features = rec.metadata
+                                        # Filtrar features numéricas
+                                        numeric_features = {k: v for k, v in features.items() 
+                                                          if isinstance(v, (int, float))}
+                                        
+                                        if numeric_features:
+                                            fig = go.Figure(data=[
+                                                go.Bar(
+                                                    x=list(numeric_features.keys()),
+                                                    y=list(numeric_features.values()),
+                                                    marker_color='lightblue'
+                                                )
+                                            ])
+                                            
+                                            fig.update_layout(
+                                                title="Decomposição do Score",
+                                                height=300,
+                                                xaxis_tickangle=-45
                                             )
-                                        ])
-                                        
-                                        fig.update_layout(
-                                            title="Decomposição do Score",
-                                            height=300
-                                        )
-                                        
-                                        st.plotly_chart(fig, use_container_width=True)
+                                            
+                                            st.plotly_chart(fig, use_container_width=True)
                         
                         # Visualizações
                         st.markdown("---")
@@ -875,12 +918,19 @@ def main():
             ### 🏗️ Arquitetura do Sistema
             
             O Steam Recommendation Agent combina **três abordagens** de machine learning:
-            
             """)
             
             col1, col2, col3 = st.columns(3)
             
             with col1:
+                st.markdown("""
+                **📚 Busca na Biblioteca**
+                - Analisa os jogos que você já possui
+                - Foca em jogos com poucas horas jogadas para as recomendações
+                - Recomenda títulos que você pode ter esquecido
+                """)
+            
+            with col2:
                 st.markdown("""
                 **🤝 Filtragem Colaborativa**
                 - Analisa usuários similares a você
@@ -888,7 +938,7 @@ def main():
                 - Baseado em padrões de comportamento
                 """)
             
-            with col2:
+            with col3:
                 st.markdown("""
                 **📝 Baseada em Conteúdo**
                 - Analisa descrições, tags e gêneros
@@ -896,23 +946,16 @@ def main():
                 - Encontra jogos com conteúdo similar
                 """)
             
-            with col3:
-                st.markdown("""
-                **🎯 Contextual**
-                - Interpreta seu prompt natural
-                - Extrai intenções e preferências
-                - Considera contexto específico
-                """)
-            
             st.markdown("""
             ### 🔄 Processo de Recomendação
             
             1. **Análise do Perfil**: Seu histórico e preferências são analisados
-            2. **Interpretação do Prompt**: Seu pedido é convertido em features
-            3. **Busca Multifonte**: Cada abordagem gera candidatos
-            4. **Fusão Híbrida**: Os resultados são combinados inteligentemente
-            5. **Ranking Final**: Jogos são ordenados por relevância
-            6. **Explicação**: Cada recomendação vem com justificativa
+            2. **Busca na Biblioteca**: Procura jogos que você já tem mas jogou pouco
+            3. **Interpretação do Prompt**: Seu pedido é convertido em features
+            4. **Busca Multifonte**: Cada abordagem gera candidatos
+            5. **Fusão Híbrida**: Os resultados são combinados inteligentemente
+            6. **Ranking Final**: Jogos são ordenados por relevância
+            7. **Explicação**: Cada recomendação vem com justificativa
             """)
         
         with tab4:
@@ -924,24 +967,25 @@ def main():
                     history = json.load(f)
                 
                 if history:
-                    # Converter para DataFrame - CORREÇÃO: Garantir que user_id existe
+                    # Converter para DataFrame
                     history_data = []
-                    for entry in history[-20:]:  # Últimas 20 entradas
+                    for entry in history[-20:]:
                         for rec in entry['recommendations']:
                             history_data.append({
                                 'timestamp': entry['timestamp'],
-                                'user_id': entry.get('user_id', 'unknown'),  # Usar .get() com valor padrão
+                                'user_id': entry.get('user_id', 'unknown'),
                                 'prompt': entry['prompt'],
                                 'game': rec['game_name'],
-                                'score': rec['score']
+                                'score': rec['score'],
+                                'source': rec.get('source', 'unknown')
                             })
                     
                     history_df = pd.DataFrame(history_data)
                     
-                    # Métricas gerais - CORREÇÃO: Verificar se colunas existem
+                    # Métricas gerais
                     st.markdown("### 📊 Estatísticas do Histórico")
                     
-                    col1, col2, col3 = st.columns(3)
+                    col1, col2, col3, col4 = st.columns(4)
                     with col1:
                         st.metric("Total de Recomendações", len(history_df))
                     with col2:
@@ -954,8 +998,14 @@ def main():
                             st.metric("Score Médio", f"{history_df['score'].mean():.2f}")
                         else:
                             st.metric("Score Médio", "N/A")
+                    with col4:
+                        if 'source' in history_df.columns:
+                            library_pct = (history_df['source'] == 'user_library').mean() * 100
+                            st.metric("Da Biblioteca", f"{library_pct:.1f}%")
+                        else:
+                            st.metric("Da Biblioteca", "N/A")
                     
-                    # Gráfico de evolução - CORREÇÃO: Verificar se timestamp existe
+                    # Gráfico de evolução
                     st.markdown("### 📈 Evolução das Recomendações")
                     
                     if 'timestamp' in history_df.columns:
@@ -1004,7 +1054,8 @@ def main():
         st.markdown("---")
         st.markdown("""
         <div style="text-align: center; color: #666;">
-            <p>🎮 Steam Recommendation Agent v1.0</p>
+            <p>🎮 Steam Recommendation Agent v2.0</p>
+            <p>Novo: Busca inteligente na sua biblioteca!</p>
             <p>Desenvolvido com Streamlit, Transformers e FAISS</p>
             <p>⚠️ Este é um projeto demonstrativo. Dados do Steam usados para fins educacionais.</p>
         </div>

@@ -41,42 +41,98 @@ class PromptInterpreter:
             logger.warning("spaCy para português não encontrado, usando regex apenas")
             self.nlp = None
 
-        
+        self.combined_features = None
         # ============== ADIÇÕES IMPORTANTES ==============
         # FEATURES ESSENCIAIS DE JOGOS (prioridade alta)
-        self.essential_features = {
+        self.feature_map = {
             # Gêneros principais
-            'ação': ['ação', 'action', 'tiro', 'fps', 'shooter', 'call of duty', 'battlefield', 'halo'],
-            'rpg': ['rpg', 'role playing', 'witcher', 'skyrim', 'final fantasy', 'dragon age'],
-            'estratégia': ['estratégia', 'strategy', 'civilization', 'age of empires', 'starcraft'],
-            'aventura': ['aventura', 'adventure', 'exploração', 'exploration', 'tomb raider', 'uncharted'],
-            'simulação': ['simulação', 'simulation', 'simulador', 'sim city', 'cities skylines'],
+            'terror': ['terror', 'horror', 'assustador', 'susto', 'medo', 'pesadelo', 'macabro'],
+            'ação': ['ação', 'action', 'tiro', 'fps', 'shooter', 'combate', 'batalha', 'call of duty', 'battlefield', 'halo'],
+            'rpg': ['rpg', 'role playing', 'papel', 'personagem', 'level', 'witcher', 'skyrim', 'final fantasy', 'dragon age'],
+            'estratégia': ['estratégia', 'strategy', 'tática', 'planejamento', 'cérebro', 'civilization', 'age of empires', 'starcraft'],
+            'aventura': ['aventura', 'adventure', 'exploração', 'descoberta', 'viagem', 'tomb raider', 'uncharted'],
+            'simulação': ['simulação', 'simulation', 'simulador', 'realista', 'sim city', 'cities skylines'],
             'esportes': ['esporte', 'sports', 'futebol', 'fifa', 'basquete', 'nba', 'corrida', 'racing'],
-            'terror': ['terror', 'horror', 'assustador', 'scary', 'resident evil', 'silent hill'],
+            'corrida': ['corrida', 'carro', 'automobilismo', 'velocidade', 'forza', 'gran turismo'],
+            'puzzle': ['puzzle', 'quebra-cabeça', 'lógica', 'enigma', 'brain teaser'],
+            'luta': ['luta', 'fighting', 'street fighter', 'mortal kombat', 'tekken'],
+            'plataforma': ['plataforma', 'platformer', 'mario', 'sonic', '2d platform'],
+            'musical': ['musical', 'rhythm', 'ritmo', 'dance', 'dança'],
+            'educacional': ['educacional', 'educational', 'aprendizado', 'learning'],
             
-            # Características importantes
-            'multijogador': ['multijogador', 'multiplayer', 'online', 'amigos', 'friends', 'coop'],
-            'cooperativo': ['cooperativo', 'cooperative', 'coop', 'co-op', 'jogar junto'],
-            'competitivo': ['competitivo', 'competitive', 'pvp', 'versus', 'ranked'],
-            'singleplayer': ['singleplayer', 'single player', 'campanha', 'campaign', 'história'],
-            'mundo aberto': ['mundo aberto', 'open world', 'sandbox', 'gta', 'red dead'],
-            'história rica': ['história', 'story', 'narrative', 'narrativa', 'personagens'],
-            'indie': ['indie', 'independente', 'independent'],
-            'gráficos': ['gráficos', 'graphics', 'realista', 'realistic', 'visual'],
+            # Características de gameplay
+            'multijogador': ['multijogador', 'multiplayer', 'online', 'amigos', 'jogar junto', 'grupo', 'coop', 'cooperativo'],
+            'cooperativo': ['cooperativo', 'cooperative', 'coop', 'co-op', 'jogar junto', 'equipe', 'juntos'],
+            'competitivo': ['competitivo', 'competitive', 'pvp', 'versus', 'ranked', 'elite', 'pro'],
+            'singleplayer': ['singleplayer', 'single player', 'solo', 'campanha', 'campaign', 'história solo'],
+            'mundo aberto': ['mundo aberto', 'open world', 'sandbox', 'livre', 'explorar', 'gta', 'red dead', 'skyrim'],
+            'história rica': ['história', 'story', 'narrativa', 'enredo', 'personagem', 'trama', 'plot', 'cinemático'],
+            'sobrevivência': ['sobrevivência', 'survival', 'crafting', 'sobreviver', 'construção', 'resource gathering'],
+            'roguelike': ['roguelike', 'procedural', 'permadeath', 'rogue', 'lite', 'replayability'],
+            'metroidvania': ['metroidvania', 'exploração', 'backtracking', 'mapa', 'upgrades'],
             
-            # Estilos de jogo
-            'casual': ['casual', 'simples', 'fácil', 'acessível', 'relaxante'],
-            'hardcore': ['hardcore', 'difícil', 'challenging', 'desafiador', 'complexo'],
-            'rápido': ['rápido', 'fast', 'quick', 'ação rápida', 'fast paced'],
-            'lento': ['lento', 'slow', 'paciente', 'estratégico', 'turn based'],
+            # Estilos e atmosfera
+            'casual': ['casual', 'simples', 'fácil', 'rápido', 'acessível', 'relaxante', 'pick up and play'],
+            'hardcore': ['hardcore', 'difícil', 'challenging', 'desafiador', 'complexo', 'elite', 'pro'],
+            'relaxante': ['relaxante', 'calmo', 'tranquilo', 'pacífico', 'zen', 'meditative', 'chill'],
+            'desafiador': ['desafiador', 'difícil', 'hardcore', 'desafio', 'challenging', 'complexo'],
+            'rápido': ['rápido', 'fast', 'quick', 'ação rápida', 'fast paced', 'arcade', 'twitch'],
+            'lento': ['lento', 'slow', 'paciente', 'estratégico', 'turn based', 'contemplativo'],
+            'imersivo': ['imersivo', 'immersive', 'profundo', 'absorbing', 'realista', 'detalhado'],
+            'criativo': ['criativo', 'creative', 'criação', 'design', 'building', 'construção', 'craft'],
+            
+            # Temas e ambientações
+            'fantasia': ['fantasia', 'fantasy', 'medieval', 'dragões', 'magia', 'elfos', 'anões'],
+            'ficção científica': ['ficção científica', 'sci-fi', 'futurista', 'espaço', 'alien', 'cyberpunk', 'distopia'],
+            'histórico': ['histórico', 'historical', 'segunda guerra', 'medieval', 'antigo', 'era vitoriana'],
+            'pós-apocalíptico': ['pós-apocalíptico', 'post-apocalyptic', 'apocalypse', 'zumbi', 'zombie', 'survival'],
+            'cyberpunk': ['cyberpunk', 'high tech', 'low life', 'futurista', 'distopia tecnológica'],
+            'steampunk': ['steampunk', 'vapor', 'retro-futurista', 'victorian technology'],
+            'noir': ['noir', 'detective', 'mistery', 'suspense', 'crime'],
+            
+            # Aspectos técnicos e visuais
+            'gráficos realistas': ['gráficos', 'graphics', 'realista', 'realistic', 'visual', '3d', 'next-gen'],
+            'pixel art': ['pixel art', 'pixel', 'retro', '8-bit', '16-bit', 'old school'],
+            'estilizado': ['estilizado', 'stylized', 'cartoon', 'cel-shaded', 'artístico', 'unique art'],
+            'primeira pessoa': ['primeira pessoa', 'first person', 'fps', '1st person'],
+            'terceira pessoa': ['terceira pessoa', 'third person', 'tps', '3rd person', 'over the shoulder'],
+            'isométrico': ['isométrico', 'isometric', 'top down', 'diagonal view'],
+            
+            # Modelo de negócio e comunidade
+            'indie': ['indie', 'independente', 'pequeno', 'independent', 'small studio'],
+            'triplo A': ['triplo A', 'AAA', 'grande orçamento', 'blockbuster', 'major studio'],
+            'gratuito': ['gratuito', 'free', 'grátis', 'free to play', 'f2p'],
+            'pago': ['pago', 'paid', 'premium', 'buy to play', 'b2p'],
+            'early access': ['early access', 'acesso antecipado', 'beta', 'alpha', 'em desenvolvimento'],
+            'mods': ['mods', 'moddable', 'customizável', 'community content'],
+            
+            # Emoções e experiências
+            'nostálgico': ['nostálgico', 'nostalgia', 'retro', 'clássico', 'old school', 'childhood'],
+            'emocionante': ['emocionante', 'exciting', 'thrilling', 'adrenaline', 'intense'],
+            'assustador': ['assustador', 'scary', 'fear', 'terror', 'horror'],
+            'divertido': ['divertido', 'fun', 'funny', 'comédia', 'comedy', 'humor'],
+            'triste': ['triste', 'sad', 'melancólico', 'emotional', 'drama'],
+            'épico': ['épico', 'epic', 'grande escala', 'large scale', 'cinematic'],
+            
+            # Recursos específicos
+            'crafting': ['crafting', 'criação', 'construção', 'building', 'fabricação'],
+            'construção': ['construção', 'building', 'base building', 'city building', 'simcity'],
+            'gerenciamento': ['gerenciamento', 'management', 'simulação de negócios', 'tycoon'],
+            'exploração': ['exploração', 'exploration', 'descobrir', 'discovery', 'map uncovering'],
+            'coleta': ['coleta', 'collecting', 'achievements', 'trophies', 'completionist'],
+            'personalização': ['personalização', 'customization', 'character creator', 'outfits', 'skins'],
         }
         
-        # FEATURES SECUNDÁRIAS (baixa prioridade) - NOVO
-        self.secondary_features = [
-            "violento", "drama", "comédia", "fantasia", "ficção científica", 
-            "histórico", "pixel art", "arcade", "retro", "musical", "educacional",
-            "roguelike", "metroidvania", "crafting", "construção", "gerenciamento"
-        ]
+        # COMBINAÇÕES POPULARES (para boost automático)
+        self.popular_combinations = {
+            ('terror', 'multijogador'): ['coop horror', 'online horror', 'multiplayer horror'],
+            ('terror', 'cooperativo'): ['coop horror', 'team horror', 'survival horror coop'],
+            ('ação', 'multijogador'): ['coop shooter', 'online action', 'multiplayer fps'],
+            ('rpg', 'multijogador'): ['mmo', 'online rpg', 'multiplayer rpg'],
+            ('estratégia', 'multijogador'): ['multiplayer strategy', 'online strategy', 'competitive strategy'],
+            ('mundo aberto', 'rpg'): ['open world rpg', 'sandbox rpg'],
+            ('sobrevivência', 'crafting'): ['survival crafting', 'base building survival'],
+        }
         
         # Categorias de jogos pré-definidas (em português)
         self.game_categories = [
@@ -104,7 +160,13 @@ class PromptInterpreter:
             'survival': ['sobrevivência', 'survival', 'crafting', 'sobreviver'],
             'horror': ['terror', 'horror', 'medo', 'susto', 'assustador'],
             'relax': ['relaxante', 'calmo', 'tranquilo', 'zen', 'pacífico'],
-            'challenge': ['desafiador', 'difícil', 'hardcore', 'desafio', 'complexo']
+            'challenge': ['desafiador', 'difícil', 'hardcore', 'desafio', 'complexo'],
+            'terror': ['horror', 'assustador', 'macabro'],
+            'multijogador': ['multiplayer', 'online', 'coop'],
+            'cooperativo': ['coop', 'co-op', 'team'],
+            'ação': ['action', 'tiro', 'shooter'],
+            'indie': ['independente', 'small studio'],
+            'gratuito': ['free', 'free to play']
         }
         
         # Padrões regex para extração
@@ -122,47 +184,20 @@ class PromptInterpreter:
         """
         prompt_text = prompt_text.lower().strip()
         features = defaultdict(float)
+
+        # 1. Extrair combinações
+        combinations = self._extract_combinations(prompt_text)
+        self.combined_features = combinations
         
-        # PALAVRAS-CHAVE ESPECÍFICAS PARA JOGOS (com pesos) - SUA VERSÃO
-        keyword_weights = {
-            # Terror/Horror
-            'terror': ['terror', 'horror', 'assustador', 'susto', 'medo', 'pesadelo', 'macabro'],
-            'multijogador': ['multijogador', 'coop', 'cooperativo', 'amigos', 'jogar junto', 'online', 'grupo'],
-            'ação': ['ação', 'tiro', 'fps', 'shooter', 'combate', 'batalha'],
-            'rpg': ['rpg', 'role playing', 'papel', 'personagem', 'level'],
-            'estratégia': ['estratégia', 'tática', 'planejamento', 'cérebro'],
-            'aventura': ['aventura', 'exploração', 'descoberta', 'viagem'],
-            'simulação': ['simulação', 'simulador', 'realista'],
-            'casual': ['casual', 'simples', 'fácil', 'rápido'],
-            'esportes': ['esporte', 'futebol', 'basquete', 'corrida', 'esportivo'],
-            'corrida': ['corrida', 'carro', 'automobilismo', 'velocidade'],
-            'puzzle': ['puzzle', 'quebra-cabeça', 'lógica', 'enigma'],
-            'relaxante': ['relaxante', 'calmo', 'tranquilo', 'pacífico'],
-            'desafiador': ['desafiador', 'difícil', 'hardcore', 'desafio'],
-            'mundo aberto': ['mundo aberto', 'sandbox', 'livre', 'explorar'],
-            'história rica': ['história', 'narrativa', 'enredo', 'personagem'],
-            'cooperativo': ['cooperativo', 'coop', 'equipe', 'juntos'],
-            'competitivo': ['competitivo', 'pvp', 'versus', 'ranked'],
-            'indie': ['indie', 'independente', 'pequeno'],
-            'gratuito': ['gratuito', 'free', 'grátis'],
-        }
-        
-        # EXTRAÇÃO POR PALAVRAS-CHAVE (heurística robusta) - SUA VERSÃO
-        for category, keywords in keyword_weights.items():
+        # EXTRAÇÃO POR PALAVRAS-CHAVE (heurística robusta)
+        for category, keywords in self.feature_map.items():
             for keyword in keywords:
                 if keyword in prompt_text:
                     # Boost para correspondências exatas
                     features[category] = max(features.get(category, 0), 0.8)
                     break
         
-        # 2. Extração de contexto específico - SUA VERSÃO
-        # Verificar se é para jogar com amigos
-        social_keywords = ['com amigos', 'jogar com', 'multijogador', 'coop', 'cooperativo', 'grupo', 'amigos']
-        if any(keyword in prompt_text for keyword in social_keywords):
-            features['multijogador'] = max(features.get('multijogador', 0), 0.9)
-            features['cooperativo'] = max(features.get('cooperativo', 0), 0.8)
-        
-        # Se mencionou "estilo [jogo]", adicionar características desse jogo - SUA VERSÃO MELHORADA
+        # Se mencionou "estilo [jogo]", adicionar características desse jogo 
         if 'estilo' in prompt_text or 'tipo' in prompt_text or 'como' in prompt_text:
             # Padrões para detectar jogos mencionados
             patterns = [
@@ -182,7 +217,7 @@ class PromptInterpreter:
             if mentioned_game:
                 # Mapear jogos para features (você pode expandir isso)
                 game_features_map = {
-                    'devour': {'terror': 0.95, 'multijogador': 0.9, 'cooperativo': 0.9, 'ação': 0.7},
+                    'devour': {'terror': 0.95, 'multijogador': 0.8, 'cooperativo': 0.8, 'ação': 0.7},
                     'call of duty': {'ação': 0.95, 'tiro': 0.9, 'fps': 0.9, 'multijogador': 0.85},
                     'cod': {'ação': 0.95, 'tiro': 0.9, 'fps': 0.9, 'multijogador': 0.85},
                     'halo': {'ação': 0.9, 'tiro': 0.85, 'fps': 0.85, 'multijogador': 0.8},
@@ -221,19 +256,7 @@ class PromptInterpreter:
                         features[feature] = max(features.get(feature, 0), score)
         
         # 3. Features derivadas
-        self._add_derived_features(features, prompt_text)
-        
-        # 4. REMOVER features que provavelmente são ruído
-        # Lista de features que geralmente são ruído do zero-shot
-        noisy_features = ['violento', 'drama', 'comédia', 'ficção científica', 'histórico', 
-                        'pixel art', 'arcade', 'triplo A', 'gratuito', 'pago', 'educacional']
-        
-        # Só manter essas se tiverem score muito alto (>0.8) ou se foram mencionadas explicitamente
-        for noisy_feature in noisy_features:
-            if noisy_feature in features and features[noisy_feature] < 0.8:
-                # Verificar se foi mencionada explicitamente no prompt
-                if noisy_feature not in prompt_text:
-                    del features[noisy_feature]
+        #self._add_derived_features(features, prompt_text)
         
         # 5. Normalização
         if features:
@@ -256,35 +279,31 @@ class PromptInterpreter:
         top_features = sorted(
             [(k, v) for k, v in features.items() if isinstance(v, (int, float))],
             key=lambda x: x[1],
-            reverse=True
+            reverse=False
         )[:5]
         
         logger.info(f"Top features extraídas: {dict(top_features)}")
-        return dict(features)
+        return dict(top_features)
     
-    def _extract_heuristic_features(self, features, text):
-        """
-        Extrai features usando heurísticas quando zero-shot não está disponível
-        """
-        # Mapeamento de palavras-chave para categorias
-        keyword_to_category = {
-            'ação': ['ação', 'tiro', 'combate', 'luta', 'batalha', 'fps'],
-            'aventura': ['aventura', 'exploração', 'descoberta', 'viagem'],
-            'rpg': ['rpg', 'papel', 'personagem', 'level', 'experiência', 'xp'],
-            'estratégia': ['estratégia', 'tática', 'planejamento', 'cérebro'],
-            'simulação': ['simulação', 'simulador', 'realista', 'físic'],
-            'casual': ['casual', 'simples', 'fácil', 'rápido', 'pequeno'],
-            'multijogador': ['multijogador', 'coop', 'cooperativo', 'amigos', 'online'],
-            'singleplayer': ['singleplayer', 'single', 'sozinho', 'solitário'],
-            'relaxante': ['relaxante', 'calmo', 'tranquilo', 'pacífico', 'zen'],
-            'desafiador': ['desafiador', 'difícil', 'hardcore', 'desafio', 'complexo']
-        }
+    def _extract_combinations(self, text):
+        combinations = {}
         
-        for category, keywords in keyword_to_category.items():
-            for keyword in keywords:
-                if keyword in text:
-                    features[category] = max(features.get(category, 0), 0.7)
-    
+        # Para cada combinação popular, verificar se os termos aparecem no texto
+        for (feat1, feat2), keywords in self.popular_combinations.items():
+            # Verificar se ambos os features aparecem no texto (ou sinônimos)
+            feat1_keywords = self.feature_map.get(feat1, [])
+            feat2_keywords = self.feature_map.get(feat2, [])
+            
+            # Verificar se há pelo menos uma keyword de cada feature
+            has_feat1 = any(keyword in text for keyword in feat1_keywords)
+            has_feat2 = any(keyword in text for keyword in feat2_keywords)
+            
+            if has_feat1 and has_feat2:
+                # Usamos a tupla (feat1, feat2) como chave
+                combinations[(feat1, feat2)] = 0.9  # Score alto para combinações
+        
+        return combinations
+
     def _extract_emotions(self, text):
         """
         Extrai emoções do texto usando heurísticas simples
@@ -393,7 +412,7 @@ class PromptInterpreter:
         other_features = []
         
         for feature, score in sorted_features:
-            if feature in self.essential_features:
+            if feature in self.feature_map:
                 essential_features.append((feature, score))
             else:
                 other_features.append((feature, score))
@@ -403,85 +422,27 @@ class PromptInterpreter:
         if len(prioritized_features) < top_n:
             prioritized_features.extend(other_features[:top_n - len(prioritized_features)])
         
-        # Criar query
+        # Criar query: priorizar as duas primeiras features, se houver
         query_parts = []
         for feature, score in prioritized_features:
-            if score > 0.5:  # Threshold razoável
+            if score > 0.5:
                 query_parts.append(feature)
         
-        # Se ainda estiver muito curta, adicionar palavras do prompt
-        if len(query_parts) < 2:
-            words = prompt_text.lower().split()
-            stop_words = {'um', 'uma', 'o', 'a', 'de', 'do', 'da', 'para', 'com', 'jogar', 'jogo', 'game'}
-            
-            for word in words:
-                if word not in stop_words and len(word) > 3 and word not in query_parts:
-                    query_parts.append(word)
-                    if len(query_parts) >= 4:
-                        break
-        
-        # Query final
-        query_text = " ".join(query_parts[:4])  # Limitar a 4 termos
+        # Query final: limitar a 4 termos, mas priorizando as combinações
+        query_text = " ".join(query_parts[:4])
 
         primary_categories = []
         for feature, score in prioritized_features[:3]:
             if score > 0.5:
                 primary_categories.append(feature)
-        
-        # Garantir tipos numéricos
-        intensity = float(features.get('intensity', 0.5))
-        complexity = float(features.get('complexity', 0.5))
-        session_length_score = float(features.get('session_length_score', 0.6))
+    
         
         return {
             'text_query': query_text,
             'features': features,
             'primary_categories': primary_categories,
-            'intensity': intensity,
-            'complexity': complexity,
             'session_length': features.get('session_length', 'média'),
-            'session_length_score': session_length_score
         }
-    
-    def create_prompt_embedding(self, prompt_text):
-        """
-        Cria embedding do prompt para comparação direta
-        
-        Args:
-            prompt_text: Texto do prompt
-            
-        Returns:
-            embedding: Vetor de features
-        """
-        features = self.extract_features(prompt_text)
-        
-        # Criar vetor fixo a partir das features
-        # Ordem: [ação, aventura, rpg, estratégia, simulação, casual, desafiador, relaxante]
-        base_categories = ['ação', 'aventura', 'rpg', 'estratégia', 
-                          'simulação', 'casual', 'desafiador', 'relaxante']
-        
-        embedding = np.zeros(len(base_categories))
-        
-        for i, category in enumerate(base_categories):
-            if category in features:
-                embedding[i] = features[category]
-            # Verificar sinônimos
-            for main_cat, synonyms in self.synonyms.items():
-                if category in synonyms and main_cat in features:
-                    embedding[i] = max(embedding[i], features[main_cat])
-        
-        # Adicionar intensidade e complexidade
-        if 'intensity' in features:
-            embedding = np.append(embedding, features['intensity'])
-        else:
-            embedding = np.append(embedding, 0.5)
-            
-        if 'complexity' in features:
-            embedding = np.append(embedding, features['complexity'])
-        else:
-            embedding = np.append(embedding, 0.5)
-        
-        return embedding
     
     def get_recommendation_rationale(self, prompt_text, game_name, match_features):
         """
