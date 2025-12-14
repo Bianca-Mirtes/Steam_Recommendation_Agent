@@ -162,7 +162,7 @@ with st.sidebar:
         st.info("Execute o pipeline de dados primeiro")
     
     st.markdown("---")
-    st.markdown("Desenvolvido com ❤️ usando:")
+    st.markdown("Desenvolvido usando:")
     st.markdown("- 🤖 Transformers")
     st.markdown("- 🔍 FAISS")
     st.markdown("- 📊 Streamlit")
@@ -296,7 +296,6 @@ def process_steam_connection(steam_input):
         
         if not steam_id:
             st.error("❌ Não foi possível identificar sua conta Steam. Verifique o formato.")
-            return get_fallback_profile()
 
         st.session_state.connected = True
         st.session_state.steam_id = steam_id
@@ -309,7 +308,6 @@ def process_steam_connection(steam_input):
         
         if not player_data:
             st.error("❌ Perfil não encontrado ou privado.")
-            return get_fallback_profile(steam_id)
         
         # Etapa 4: Buscar biblioteca de jogos
         status_placeholder.markdown("**🎮 Analisando sua biblioteca...**")
@@ -318,8 +316,7 @@ def process_steam_connection(steam_input):
         games_data = steam_api.get_owned_games(steam_id)
         
         if not games_data or games_data['game_count'] == 0:
-            st.warning("⚠️ Sua biblioteca está vazia ou privada. Usando modo de demonstração.")
-            return get_fallback_profile(steam_id, player_data)
+            st.warning("⚠️ Sua biblioteca está vazia ou privada.")
         
         # Etapa 5: Analisar perfil
         status_placeholder.markdown("**📊 Criando seu perfil de jogador...**")
@@ -390,13 +387,11 @@ def process_steam_connection(steam_input):
         2. Crie uma chave
         3. Adicione no arquivo `config/steam_config.py`
         """)
-        return get_fallback_profile()
     
     except Exception as e:
         st.error(f"❌ Erro na conexão: {str(e)}")
         st.session_state.form_submitted = False
         st.info("Verifique sua conexão ou tente novamente em alguns instantes.")
-        return get_fallback_profile()
 
 def show_profile_summary(user_profile, games_data, profile_analysis):
     """Mostra resumo do perfil do usuário"""
@@ -420,48 +415,6 @@ def show_profile_summary(user_profile, games_data, profile_analysis):
             tags = " ".join([f"`{genre}`" for genre in profile_analysis['preferred_genres'][:5]])
             st.markdown(tags)
 
-def get_fallback_profile(steam_id=None, player_data=None):
-    """Retorna um perfil de demonstração quando a API falha"""
-    fallback_appids = [
-        730,    # Counter-Strike 2
-        570,    # Dota 2
-        271590, # GTA V
-        292030, # The Witcher 3
-        413150, # Stardew Valley
-        105600, # Terraria
-        550,    # Left 4 Dead 2
-        620,    # Portal 2
-        4000,   # Garry's Mod
-        10,     # Counter-Strike
-    ]
-    
-    library_details = [
-        {'appid': 730, 'name': 'Counter-Strike 2', 'playtime_hours': 0.5},
-        {'appid': 570, 'name': 'Dota 2', 'playtime_hours': 1.2},
-        {'appid': 271590, 'name': 'GTA V', 'playtime_hours': 2.8},
-        {'appid': 292030, 'name': 'The Witcher 3', 'playtime_hours': 0.0},
-        {'appid': 413150, 'name': 'Stardew Valley', 'playtime_hours': 1.5},
-    ]
-    
-    return {
-        'user_id': steam_id or 'user_demo',
-        'persona_name': player_data['personaname'] if player_data else 'Demo User',
-        'playstyle': 'Moderado',
-        'avg_playtime': 15,
-        'favorite_genre': ['Action', 'Adventure'],
-        'user_library': fallback_appids,
-        'library_details': library_details,
-        'playtimes': {
-            730: 0.5,
-            570: 1.2,
-            271590: 2.8,
-            292030: 0.0,
-            413150: 1.5,
-        },
-        'total_hours': 1500,
-        'game_count': 50,
-        'games_under_3h': 5
-    }
 
 def display_recommendation_metrics(recommendations):
     """Exibe métricas das recomendações"""
