@@ -104,7 +104,7 @@ with st.sidebar:
     n_recommendations = st.slider(
         "Número de Recomendações",
         min_value=3,
-        max_value=10,
+        max_value=7,
         value=5
     )
     
@@ -196,9 +196,10 @@ def load_models():
         steam_api = SteamAPI()
         
         # Carregar AGENTE SIMPLIFICADO
-        from src.agent import ImprovedRecommendationAgent
+        from src.agent import RecommendationAgent
         
-        agent = ImprovedRecommendationAgent(
+        agent = RecommendationAgent(
+            profile_analyzer=analyzer,
             prompt_interpreter=interpreter,
             games_df=games_df,
             steam_api=steam_api
@@ -652,46 +653,18 @@ def main():
                     use_container_width=True
                 )
             
-            # Exemplos de prompts
-            with st.expander("💡 Exemplos de prompts"):
-                examples = [
-                    "Jogo de estratégia complexo para jogar nas férias",
-                    "Algo rápido e casual para jogar no intervalo do trabalho",
-                    "RPG com mundo aberto e muita exploração",
-                    "Jogo cooperativo para jogar com amigos online"
-                ]
-                
-                for example in examples:
-                    if st.button(example, key=f"example_{example}"):
-                        st.session_state.prompt_example = example
-                        st.rerun()
-            
-            if 'prompt_example' in st.session_state:
-                prompt = st.session_state.prompt_example
-                del st.session_state.prompt_example
-            
             # Gerar recomendações
             if generate_button and prompt and user_profile['user_library']:
                 with st.spinner("🤖 Analisando seu perfil e gerando recomendações..."):
                     try:
                         # Verificar se estamos usando o novo agente
                         if hasattr(models['agent'], 'recommend_from_prompt'):
-                            # USAR NOVO AGENTE (EnhancedRecommendationAgent)
                             recommendations = models['agent'].recommend_from_prompt(
                                 user_id=user_profile['user_id'],
                                 user_prompt=prompt,
                                 n_recommendations=n_recommendations
                             )
-                        else:
-                            # USAR AGENTE ANTIGO (fallback)
-                            st.warning("⚠️ Usando sistema de recomendação antigo. A busca na biblioteca não está disponível.")
-                            recommendations = models['agent'].recommend(
-                                user_profile=user_profile,
-                                user_prompt=prompt,
-                                user_library=user_profile['user_library'],
-                                n_recommendations=n_recommendations
-                            )
-                        
+
                         # Exibir métricas
                         display_recommendation_metrics(recommendations)
                         

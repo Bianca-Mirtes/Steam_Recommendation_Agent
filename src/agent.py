@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 @dataclass
-class ImprovedRecommendation:
+class Recommendation:
     """Classe para representar uma recomendação"""
     game_id: Any
     game_name: str
@@ -21,8 +21,9 @@ class ImprovedRecommendation:
     source: str
     metadata: Dict[str, Any]
 
-class ImprovedRecommendationAgent:
+class RecommendationAgent:
     def __init__(self, 
+                 profile_analyzer,
                  prompt_interpreter,
                  games_df,
                  steam_api):
@@ -30,10 +31,12 @@ class ImprovedRecommendationAgent:
         Agente melhorado de recomendações
         
         Args:
-            prompt_interpreter: Instância do PromptInterpreter
+            profile_analyzer: Instância do ProfileAnalyzer para análise de perfil
+            prompt_interpreter: Instância do PromptInterpreter para interpretação de prompts
             games_df: DataFrame com informações dos jogos
             steam_api: Instância da SteamAPI
         """
+        self.profile_analyzer = profile_analyzer
         self.prompt_interpreter = prompt_interpreter
         self.games_df = games_df
         self.steam_api = steam_api
@@ -46,12 +49,13 @@ class ImprovedRecommendationAgent:
     def recommend_from_prompt(self, 
                             user_id: str,
                             user_prompt: str,
-                            n_recommendations: int = 5) -> List[ImprovedRecommendation]:
+                            n_recommendations: int = 5) -> List[Recommendation]:
         """
         Fluxo principal de recomendação:
         1. Extrai TODAS as features importantes do prompt
         2. Busca primeiro na biblioteca
         3. Se não encontrar, busca no dataset considerando múltiplas features
+        4. Usa ProfileAnalyzer para dar boost baseado no perfil
         """
         logger.info(f"Iniciando recomendação para usuário {user_id}")
         logger.info(f"Prompt: {user_prompt}")
@@ -61,19 +65,19 @@ class ImprovedRecommendationAgent:
             library_data = self.steam_api.get_owned_games(user_id)
             if not library_data:
                 logger.error("Não foi possível obter biblioteca do usuário")
-                return self._get_popular_fallback([], n_recommendations)
+                return self._get_popular_fallback([], n_recommendations, user_id)
             
             user_library = library_data['games']
             user_library_appids = [game['appid'] for game in user_library]
             logger.info(f"Biblioteca do usuário: {len(user_library)} jogos")
             
-            # 2. Extrair TODAS as features importantes do prompt (não só a principal)
+            # 2. Extrair as features importantes do prompt 
             prompt_features = self.prompt_interpreter.interpret_to_query(user_prompt)
             all_features = self._get_all_important_features(prompt_features)
             
             if not all_features:
                 logger.warning("Não foi possível extrair features do prompt")
-                return self._get_popular_fallback(user_library_appids, n_recommendations)
+                return self._get_popular_fallback(user_library_appids, n_recommendations, user_id)
             
             logger.info(f"Features importantes: {all_features}")
             
@@ -93,7 +97,7 @@ class ImprovedRecommendationAgent:
                 final_recs = sorted_recs[:n_recommendations]
                 
                 for rec in final_recs:
-                    rec.rationale = self._generate_library_rationale(rec)
+                    rec.rationale = self._generate_library_rationale(rec, user_prompt)
                 
                 logger.info(f"Retornando {len(final_recs)} recomendações da biblioteca")
                 return final_recs
@@ -105,7 +109,8 @@ class ImprovedRecommendationAgent:
             dataset_recs = self._search_in_dataset_with_features(
                 features=all_features,
                 user_library=user_library_appids,
-                n_recommendations=remaining
+                n_recommendations=remaining,
+                user_id=user_id
             )
             
             # 6. Combinar resultados
@@ -114,7 +119,7 @@ class ImprovedRecommendationAgent:
             # 7. Se ainda não tem o suficiente, adicionar fallback popular
             if len(all_recs) < n_recommendations:
                 additional = n_recommendations - len(all_recs)
-                fallback_recs = self._get_popular_fallback(user_library_appids, additional)
+                fallback_recs = self._get_popular_fallback(user_library_appids, additional, user_id)
                 all_recs.extend(fallback_recs)
             
             # Garantir que não passamos do limite
@@ -123,7 +128,7 @@ class ImprovedRecommendationAgent:
             # Gerar explicações finais
             for rec in all_recs:
                 if rec.rationale == "":
-                    rec.rationale = self._generate_dataset_rationale(rec)
+                    rec.rationale = self._generate_enhanced_rationale(rec, user_prompt, user_id)
             
             logger.info(f"Recomendações finais: {len(all_recs)} (biblioteca: {len(library_recs)}, dataset: {len(dataset_recs)})")
             
@@ -133,11 +138,25 @@ class ImprovedRecommendationAgent:
             logger.error(f"Erro no fluxo de recomendação: {str(e)}")
             logger.exception(e)
             # Fallback em caso de erro
-            return self._get_popular_fallback([], n_recommendations)
+            return self._get_popular_fallback([], n_recommendations, user_id)
+    
+    def _generate_enhanced_rationale(self, recommendation: Recommendation, user_prompt: str, user_id: str = None) -> str:
+        """
+        Gera explicação aprimorada para jogos do dataset
+        """
+        source = recommendation.source
+        metadata = recommendation.metadata
+        
+        if source == "dataset":
+            return self._generate_dataset_rationale(recommendation, user_prompt, user_id)
+        elif source == "popular_fallback":
+            return recommendation.rationale
+        else:
+            return self._generate_dataset_rationale(recommendation, user_prompt, user_id)
     
     def _get_all_important_features(self, prompt_features: Dict) -> List[str]:
         """
-        Extrai todas as features importantes do prompt (não só a principal)
+        Extrai todas as features importantes do prompt
         
         Args:
             prompt_features: Output do PromptInterpreter
@@ -184,58 +203,28 @@ class ImprovedRecommendationAgent:
         
         # Mapeamento de sinônimos para termos padrão
         feature_mapping = {
-            # RPG
             'rpg': ['rpg', 'role-playing', 'role playing', 'papel'],
-            
-            # Mundo Aberto
             'mundo aberto': ['mundo aberto', 'open world', 'sandbox', 'livre', 'explorar', 'exploração'],
-            
-            # Ação
             'ação': ['ação', 'action', 'tiro', 'shooter', 'fps', 'combate', 'batalha'],
             
-            # Aventura
             'aventura': ['aventura', 'adventure', 'descoberta', 'viagem'],
-            
-            # Terror
             'terror': ['terror', 'horror', 'assustador', 'medo', 'suspense'],
-            
-            # Multijogador
             'multijogador': ['multijogador', 'multiplayer', 'coop', 'cooperativo', 'co-op', 'online', 'amigos'],
-            
-            # Estratégia
+
             'estratégia': ['estratégia', 'strategy', 'tático', 'planejamento', 'cérebro'],
-            
-            # Simulação
             'simulação': ['simulação', 'simulation', 'simulador'],
-            
-            # Corrida
             'corrida': ['corrida', 'racing', 'carro', 'automobilismo', 'velocidade'],
-            
-            # Esportes
+
             'esporte': ['esporte', 'sports', 'futebol', 'basquete', 'fifa', 'nba'],
-            
-            # Puzzle
             'puzzle': ['puzzle', 'quebra-cabeça', 'lógica', 'enigma'],
-            
-            # Indie
             'indie': ['indie', 'independente'],
             
-            # Casual
             'casual': ['casual', 'relaxante', 'leve', 'simples', 'fácil', 'rápido'],
-            
-            # Competitivo
             'competitivo': ['competitivo', 'pvp', 'ranked', 'versus'],
-            
-            # História
             'história': ['história', 'story', 'narrativa', 'enredo', 'personagem', 'trama'],
             
-            # Sobrevivência
             'sobrevivência': ['sobrevivência', 'survival', 'crafting', 'sobreviver'],
-            
-            # Roguelike
             'roguelike': ['roguelike', 'procedural', 'permadeath', 'rogue', 'lite'],
-            
-            # Metroidvania
             'metroidvania': ['metroidvania', 'metroid', 'vania'],
         }
         
@@ -251,7 +240,7 @@ class ImprovedRecommendationAgent:
                                         user_library: List[Dict],
                                         features: List[str],
                                         max_hours: float = 3,
-                                        n_recommendations: int = 5) -> List[ImprovedRecommendation]:
+                                        n_recommendations: int = 5) -> List[Recommendation]:
         """
         Busca jogos na biblioteca que:
         1. Tenham menos de max_hours de gameplay
@@ -303,7 +292,7 @@ class ImprovedRecommendationAgent:
                 # Score final
                 final_score = min(best_score + library_bonus, 1.0)
                 
-                rec = ImprovedRecommendation(
+                rec = Recommendation(
                     game_id=appid,
                     game_name=game['name'],
                     score=final_score,
@@ -401,14 +390,15 @@ class ImprovedRecommendationAgent:
     def _search_in_dataset_with_features(self,
                                         features: List[str],
                                         user_library: List[int],
-                                        n_recommendations: int) -> List[ImprovedRecommendation]:
+                                        n_recommendations: int,
+                                        user_id: str = None) -> List[Recommendation]:
         """
         Busca no dataset por jogos que tenham PELO MENOS UMA das features
         """
         recommendations = []
         
         if not features:
-            return self._get_popular_fallback(user_library, n_recommendations)
+            return self._get_popular_fallback(user_library, n_recommendations, user_id)
         
         logger.info(f"Buscando jogos no dataset com features: {features}")
         
@@ -417,7 +407,7 @@ class ImprovedRecommendationAgent:
         
         if len(available_games) == 0:
             logger.warning("Nenhum jogo disponível no dataset após filtrar biblioteca")
-            return self._get_popular_fallback(user_library, n_recommendations)
+            return self._get_popular_fallback(user_library, n_recommendations, user_id)
         
         # Para cada jogo disponível, verificar se tem alguma feature
         for _, game_row in available_games.iterrows():
@@ -429,15 +419,22 @@ class ImprovedRecommendationAgent:
             if best_feature and best_score > 0.1:  # Threshold baixo para aceitar
                 # Adicionar bônus por qualidade (do agente antigo)
                 quality_bonus = self._calculate_quality_bonus(game_row)
+
+                # Bônus por popularidade
+                popularity_bonus = self._calculate_popularity_bonus(game_row)
+                
+                # Bônus baseado no perfil
+                profile_bonus = self._calculate_profile_bonus(game_row['appid'], user_id)
                 
                 # Score final = match_score + quality_bonus (máximo 1.0)
                 final_score = min(best_score + quality_bonus, 1.0)
                 
-                # Bônus extra por popularidade (se muito bem avaliado)
-                popularity_bonus = self._calculate_popularity_bonus(game_row)
-                final_score = min(final_score + (popularity_bonus * 0.5), 1.0)
+                final_score = min(
+                    best_score + quality_bonus + (popularity_bonus * 0.5) + profile_bonus,
+                    1.0
+                )
                 
-                rec = ImprovedRecommendation(
+                rec = Recommendation(
                     game_id=game_row['appid'],
                     game_name=game_row.get('name', 'Desconhecido'),
                     score=final_score,
@@ -449,7 +446,8 @@ class ImprovedRecommendationAgent:
                         'quality_bonus': quality_bonus,
                         'popularity_bonus': popularity_bonus,
                         'positive_ratio': game_row.get('positive_ratio', 0),
-                        'all_features': features
+                        'all_features': features,
+                        'game_data': game_row.to_dict()
                     }
                 )
                 recommendations.append(rec)
@@ -463,7 +461,7 @@ class ImprovedRecommendationAgent:
     
     def _calculate_quality_bonus(self, game_row) -> float:
         """
-        Calcula bônus baseado na qualidade do jogo (do agente antigo)
+        Calcula bônus baseado na qualidade do jogo
         """
         bonus = 0.0
         pos_ratio = game_row.get('positive_ratio', 0)
@@ -479,7 +477,7 @@ class ImprovedRecommendationAgent:
     
     def _calculate_popularity_bonus(self, game_row) -> float:
         """
-        Calcula bônus baseado na popularidade (do agente antigo)
+        Calcula bônus baseado na popularidade
         """
         bonus = 0.0
         total_reviews = 0
@@ -496,9 +494,48 @@ class ImprovedRecommendationAgent:
         
         return bonus
     
-    def _get_popular_fallback(self, user_library: List[int], n_recommendations: int) -> List[ImprovedRecommendation]:
+    def _calculate_profile_bonus(self, game_id: int, user_id: str) -> float:
         """
-        Fallback: recomenda jogos populares e bem avaliados (do agente antigo)
+        Calcula bônus baseado no perfil do usuário usando ProfileAnalyzer
+        
+        Args:
+            game_id: appid do jogo
+            user_id: ID do usuário
+            
+        Returns:
+            Bônus de perfil (0.0 a 0.3)
+        """
+        try:
+            # Verificar se o usuário está no modelo do ProfileAnalyzer
+            if (hasattr(self.profile_analyzer, 'user_encoder') and 
+                user_id in self.profile_analyzer.user_encoder):
+                
+                # Obter recomendações colaborativas para o usuário
+                collab_df = self.profile_analyzer.recommend_from_profile(
+                    user_id=user_id,
+                    games_df=self.games_df,
+                    top_n=100,
+                    exclude_played=True,
+                    user_library=[]
+                )
+                
+                # Verificar se o jogo está nas recomendações colaborativas
+                if not collab_df.empty and 'appid' in collab_df.columns:
+                    matching_row = collab_df[collab_df['appid'] == game_id]
+                    if not matching_row.empty:
+                        # Extrair score colaborativo (normalizado para 0-1)
+                        collab_score = float(matching_row.iloc[0].get('score', 0))
+                        # Converter para bônus (0.0 a 0.3)
+                        return min(collab_score * 0.3, 0.3)
+            
+        except Exception as e:
+            logger.warning(f"Erro ao calcular bônus de perfil: {e}")
+        
+        return 0.0
+    
+    def _get_popular_fallback(self, user_library: List[int], n_recommendations: int, user_id: str) -> List[Recommendation]:
+        """
+        Fallback: recomenda jogos populares e bem avaliados
         """
         recommendations = []
         
@@ -541,8 +578,11 @@ class ImprovedRecommendationAgent:
                     base_score += 0.2
                 elif total_reviews > 1000:
                     base_score += 0.1
+
+                 # Bônus do perfil
+                profile_bonus = self._calculate_profile_bonus(row['appid'], user_id) if user_id else 0.0
                 
-                rec = ImprovedRecommendation(
+                rec = Recommendation(
                     game_id=row['appid'],
                     game_name=row.get('name', 'Desconhecido'),
                     score=min(base_score, 0.9),
@@ -551,6 +591,7 @@ class ImprovedRecommendationAgent:
                     metadata={
                         'positive_ratio': pos_ratio,
                         'total_reviews': total_reviews,
+                        'profile_bonus': profile_bonus,
                         'popular_fallback': True
                     }
                 )
@@ -561,54 +602,135 @@ class ImprovedRecommendationAgent:
         
         return recommendations[:n_recommendations]
     
-    def _generate_library_rationale(self, recommendation: ImprovedRecommendation) -> str:
-        """Gera explicação para jogos da biblioteca"""
+    def _generate_library_rationale(self, recommendation: Recommendation, user_prompt: str) -> str:
+        """
+        Gera explicação aprimorada para jogos da biblioteca
+        """
         playtime = recommendation.metadata.get('playtime_hours', 0)
         best_feature = recommendation.metadata.get('best_feature', '')
         match_score = recommendation.metadata.get('match_score', 0)
+        profile_bonus = recommendation.metadata.get('profile_bonus', 0)
         
+        # Informação sobre tempo de jogo
         if playtime == 0:
             time_info = "que você ainda não jogou"
+            suggestion = "É uma ótima oportunidade para descobrir este jogo que já está na sua biblioteca!"
         else:
             time_info = f"que você jogou apenas {playtime:.1f} horas"
+            suggestion = "Parece que você ainda não explorou tudo que este jogo tem a oferecer!"
         
-        if match_score > 0.6:
-            match_strength = "combina muito bem"
-        elif match_score > 0.3:
-            match_strength = "combina bem"
+        # Força do match
+        if match_score > 0.7:
+            match_strength = "combina perfeitamente"
+            match_detail = f"com sua busca por {best_feature}"
+        elif match_score > 0.4:
+            match_strength = "se encaixa muito bem"
+            match_detail = f"no que você está procurando em termos de {best_feature}"
         else:
-            match_strength = "tem relação com"
+            match_strength = "tem relação"
+            match_detail = f"com aspectos de {best_feature}, como você mencionou"
+
+        # Informação do perfil 
+        profile_info = ""
+        if profile_bonus > 0.2:
+            profile_info = " Além disso, jogadores com gostos similares aos seus também gostam deste jogo."
+        elif profile_bonus > 0.1:
+            profile_info = " Este jogo também é apreciado por jogadores com perfil similar ao seu."
         
-        return f"{recommendation.game_name} é um jogo {time_info} e {match_strength} com sua busca por jogos de {best_feature}. Vale a pena dar uma chance!"
+          # Informação sobre qualidade do jogo
+        quality_info = ""
+        game_data = recommendation.metadata.get('game_data', {})
+        if 'positive_ratio' in game_data:
+            pos_ratio = game_data['positive_ratio']
+            if pos_ratio >= 90:
+                quality_info = " Ele tem avaliações excelentes da comunidade."
+            elif pos_ratio >= 80:
+                quality_info = " É um jogo muito bem avaliado pelos jogadores."
+        
+        rationale = (
+            f"**{recommendation.game_name}** é um jogo {time_info} que {match_strength} {match_detail}. "
+            f"{suggestion}{quality_info}{profile_info}"
+        )
+        return rationale    
     
-    def _generate_dataset_rationale(self, recommendation: ImprovedRecommendation) -> str:
-        """Gera explicação para jogos do dataset"""
-        source = recommendation.source
+    def _generate_dataset_rationale(self, recommendation: Recommendation, user_prompt: str, user_id: str = None) -> str:
+        """
+        Gera explicação detalhada para jogos do dataset
+        """
         best_feature = recommendation.metadata.get('best_feature', '')
         match_score = recommendation.metadata.get('match_score', 0)
         quality_bonus = recommendation.metadata.get('quality_bonus', 0)
+        popularity_bonus = recommendation.metadata.get('popularity_bonus', 0)
+        profile_bonus = recommendation.metadata.get('profile_bonus', 0)
+        game_data = recommendation.metadata.get('game_data', {})
         
-        if source == "dataset":
-            if match_score > 0.7:
-                match_desc = "combina muito bem"
-            elif match_score > 0.4:
-                match_desc = "combina bem"
-            else:
-                match_desc = "tem relação com"
-            
-            rationale = f"{recommendation.game_name} {match_desc} com sua busca por jogos de {best_feature}."
-            
-            # Adicionar informação sobre qualidade
-            if quality_bonus >= 0.2:
-                rationale += " Tem avaliações excelentes da comunidade."
-            elif quality_bonus >= 0.1:
-                rationale += " É bem avaliado pelos jogadores."
-        
-        elif source == "popular_fallback":
-            rationale = f"{recommendation.game_name} é um jogo popular bem avaliado que pode te interessar."
-        
+        # Parte 1: Match com a busca
+        if match_score > 0.7:
+            match_phrase = f"**{recommendation.game_name}** é uma excelente escolha que atende perfeitamente"
+        elif match_score > 0.4:
+            match_phrase = f"**{recommendation.game_name}** se encaixa muito bem"
         else:
-            rationale = f"{recommendation.game_name} é uma boa recomendação baseada no seu perfil."
+            match_phrase = f"**{recommendation.game_name}** tem características que podem interessar"
+        
+        feature_phrase = f"à sua busca por {best_feature}"
+        
+        # Parte 2: Qualidade do jogo
+        quality_phrase = ""
+        if 'positive_ratio' in game_data:
+            pos_ratio = game_data['positive_ratio']
+            if pos_ratio >= 90:
+                quality_phrase = f" Com impressionantes {pos_ratio}% de avaliações positivas,"
+            elif pos_ratio >= 80:
+                quality_phrase = f" Com {pos_ratio}% de avaliações positivas,"
+            elif pos_ratio >= 70:
+                quality_phrase = f" Bem avaliado pelos jogadores ({pos_ratio}% positivas),"
+        
+        quality_detail = ""
+        if quality_bonus >= 0.2:
+            quality_detail = " é considerado um jogo de alta qualidade pela comunidade."
+        elif quality_bonus >= 0.1:
+            quality_detail = " tem recebido boas críticas dos jogadores."
+        
+        # Parte 3: Popularidade
+        popularity_phrase = ""
+        if popularity_bonus >= 0.2:
+            popularity_phrase = " Além disso, é muito popular na Steam"
+        elif popularity_bonus >= 0.1:
+            popularity_phrase = " É um jogo bastante popular"
+        
+        # Parte 4: Recomendação baseada no perfil
+        profile_phrase = ""
+        if profile_bonus > 0.2:
+            profile_phrase = " Jogadores com gostos similares aos seus costumam gostar muito deste título."
+        elif profile_bonus > 0.1:
+            profile_phrase = " Baseado no seu perfil de jogador, este jogo pode ser uma boa escolha."
+        
+        # Parte 5: Informações adicionais
+        extra_info = ""
+        if 'genres' in game_data:
+            genres = str(game_data['genres']).split(';')
+            if len(genres) > 0 and genres[0]:
+                main_genre = genres[0].strip()
+                extra_info = f" O jogo é primariamente do gênero {main_genre}."
+        
+        if 'average_playtime' in game_data and game_data['average_playtime'] > 0:
+            avg_hours = game_data['average_playtime'] / 60
+            if avg_hours < 10:
+                extra_info += " As sessões de jogo costumam ser mais curtas, ideal para jogar em intervalos."
+            elif avg_hours > 50:
+                extra_info += " Oferece muitas horas de conteúdo, perfeito para se imergir por longos períodos."
+        
+        # Construir a explicação final
+        rationale_parts = [
+            f"{match_phrase} {feature_phrase}.",
+            f"{quality_phrase}{quality_detail}",
+            f"{popularity_phrase}.",
+            f"{profile_phrase}",
+            f"{extra_info}"
+        ]
+        
+        # Remover partes vazias e juntar
+        rationale = " ".join([part for part in rationale_parts if part.strip()])
         
         return rationale
     
