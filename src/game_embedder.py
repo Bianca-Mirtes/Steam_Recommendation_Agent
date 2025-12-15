@@ -159,35 +159,27 @@ class GameEmbedder:
         return index
     
     def search_similar_games(self, query, games_df, index, top_k=10, 
-                       search_by='text', threshold=0.15, return_dataframe=True):
+                       search_by='text', threshold=0.2, return_dataframe=True, related_terms=None):
         """
-        Busca jogos similares - VERSÃO MELHORADA
+        Busca jogos similares 
         """
         if 'appid' not in games_df.columns:
             raise ValueError("games_df deve conter coluna 'appid'")
         
-        # MELHORIA: Expandir a query para termos relacionados
-        query_expanded = query
-        query_lower = query.lower()
-        
-        # Adicionar termos relacionados baseados na query
-        related_terms = {
-            'terror': ['horror', 'assustador', 'medo', 'macabro', 'sobrenatural'],
-            'multijogador': ['coop', 'cooperativo', 'online', 'amigos', 'grupo'],
-            'coop': ['cooperativo', 'multijogador', 'equipe', 'juntos'],
-            'ação': ['tiro', 'fps', 'combate', 'batalha', 'adrenalina'],
-            'rpg': ['role playing', 'personagem', 'level', 'experiência'],
-        }
-        
-        for term, related_list in related_terms.items():
-            if term in query_lower:
-                for related in related_list[:2]:  # Adicionar 2 termos relacionados
-                    if related not in query_lower:
-                        query_expanded += " " + related
-        
         # Criar embedding da query
         if search_by == 'text':
             if isinstance(query_expanded, str):
+
+                        # MELHORIA: Expandir a query para termos relacionados
+                query_expanded = query
+                query_lower = query.lower()
+                
+                for term, related_list in related_terms.items():
+                    if term in query_lower:
+                        for related in related_list[:2]:  # Adicionar 2 termos relacionados
+                            if related not in query_lower:
+                                query_expanded += " " + related
+                                
                 query_embedding = self.model.encode(
                     query_expanded,
                     convert_to_tensor=True,
@@ -285,98 +277,47 @@ class GameEmbedder:
         
         return results
     
-    def search_by_game_id(self, game_id, games_df, index, top_k=10, embedding_type='text'):
+    def search_by_game_id(self, game_id, games_df, index, top_k=10):
         """
-        Busca jogos similares a um jogo específico
-        
-        Args:
-            game_id: appid do jogo de referência
-            games_df: DataFrame com jogos
-            index: Índice FAISS
-            top_k: Número de resultados
-            embedding_type: Tipo de embedding a usar ('text', 'hybrid')
-            
-        Returns:
-            DataFrame com resultados
+        Busca jogos similares a um jogo específico.
+        Usa embedding se existir, senão usa texto.
         """
-        if game_id not in self.embedding_cache:
-            raise ValueError(f"Game ID {game_id} não encontrado no cache")
-        
-        # Obter embedding do jogo
-        if embedding_type == 'text':
+
+        # Caso 1 — embedding existe
+        if game_id in self.embedding_cache:
             query_embedding = self.embedding_cache[game_id]['text_embedding']
-        elif embedding_type == 'hybrid' and 'hybrid_embedding' in self.embedding_cache[game_id]:
-            query_embedding = self.embedding_cache[game_id]['hybrid_embedding']
-        else:
-            query_embedding = self.embedding_cache[game_id]['text_embedding']
-        
-        return self.search_similar_games(
-            query_embedding, 
-            games_df, 
-            index, 
-            top_k=top_k, 
-            search_by='embedding'
-        )
-    
-    def search_with_filters(self, query_text, games_df, index, top_k=10,
-                          min_positive_ratio=0, max_price=None, genres=None):
-        """
-        Busca jogos similares com filtros
-        
-        Args:
-            query_text: Texto de consulta
-            games_df: DataFrame com jogos
-            index: Índice FAISS
-            top_k: Número de resultados
-            min_positive_ratio: Filtro mínimo de avaliações positivas
-            max_price: Preço máximo
-            genres: Lista de gêneros para filtrar
-            
-        Returns:
-            DataFrame com resultados filtrados
-        """
-        # Primeiro, buscar sem filtros
-        results = self.search_similar_games(
-            query_text, games_df, index, top_k=top_k * 3, return_dataframe=True
-        )
-        
-        if len(results) == 0:
+
+            return self.search_similar_games(
+                query_embedding,
+                games_df,
+                index,
+                top_k=top_k,
+                search_by='embedding'
+            )
+
+        # Caso 2 — fallback para texto
+        game_row = games_df[games_df['appid'] == game_id]
+
+        if game_row.empty:
             return pd.DataFrame()
-        
-        # Aplicar filtros
-        filtered_results = []
-        
-        for _, row in results.iterrows():
-            game_id = row['appid']
-            game_data = games_df[games_df['appid'] == game_id]
-            
-            if len(game_data) == 0:
-                continue
-            
-            game_info = game_data.iloc[0]
-            
-            # Verificar filtro de positive_ratio
-            if min_positive_ratio > 0:
-                if 'positive_ratio' not in game_info or game_info['positive_ratio'] < min_positive_ratio:
-                    continue
-            
-            # Verificar filtro de preço
-            if max_price is not None:
-                if 'price' in game_info and game_info['price'] > max_price:
-                    continue
-            
-            # Verificar filtro de gêneros
-            if genres:
-                game_genres = str(game_info.get('genres', '')).lower()
-                if not any(genre.lower() in game_genres for genre in genres):
-                    continue
-            
-            filtered_results.append(row.to_dict())
-            
-            if len(filtered_results) >= top_k:
-                break
-        
-        return pd.DataFrame(filtered_results)
+
+        # Usar texto do jogo como query
+        text_query = ""
+
+        if 'combined_text' in game_row.columns:
+            text_query = str(game_row.iloc[0]['combined_text'])
+        elif 'short_description' in game_row.columns:
+            text_query = str(game_row.iloc[0]['short_description'])
+        else:
+            return pd.DataFrame()
+
+        return self.search_similar_games(
+            text_query,
+            games_df,
+            index,
+            top_k=top_k,
+            search_by='text'
+        )
     
     def save_all(self, save_dir="embeddings"):
         """
@@ -467,17 +408,8 @@ def create_game_embeddings_pipeline(games_df, output_dir="embeddings",
     embedder = GameEmbedder()
     
     # Criar embeddings
-    if use_hybrid and numeric_features:
-        result = embedder.create_hybrid_embeddings(
-            games_df, 
-            numeric_features=numeric_features,
-            weight_text=0.7,
-            weight_numeric=0.3
-        )
-        embeddings = result['hybrid_embeddings']
-    else:
-        result = embedder.create_game_embeddings(games_df)
-        embeddings = result['text_embeddings']
+    result = embedder.create_game_embeddings(games_df)
+    embeddings = result['text_embeddings']
     
     # Construir índice FAISS
     index = embedder.build_faiss_index(

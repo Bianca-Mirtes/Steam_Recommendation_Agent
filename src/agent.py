@@ -25,20 +25,18 @@ class RecommendationAgent:
     def __init__(self, 
                  profile_analyzer,
                  prompt_interpreter,
+                 embedder,
                  games_df,
+                 interactions_df,
                  steam_api):
         """
-        Agente melhorado de recomendações
-        
-        Args:
-            profile_analyzer: Instância do ProfileAnalyzer para análise de perfil
-            prompt_interpreter: Instância do PromptInterpreter para interpretação de prompts
-            games_df: DataFrame com informações dos jogos
-            steam_api: Instância da SteamAPI
+        Agente de recomendações de jogos Steam
         """
         self.profile_analyzer = profile_analyzer
         self.prompt_interpreter = prompt_interpreter
+        self.embedder = embedder
         self.games_df = games_df
+        self.interactions_df = interactions_df
         self.steam_api = steam_api
         
         # Configuração
@@ -73,18 +71,18 @@ class RecommendationAgent:
             
             # 2. Extrair as features importantes do prompt 
             prompt_features = self.prompt_interpreter.interpret_to_query(user_prompt)
-            all_features = self._get_all_important_features(prompt_features)
+            top_features = prompt_features['primary_categories']
             
-            if not all_features:
+            if not top_features:
                 logger.warning("Não foi possível extrair features do prompt")
                 return self._get_popular_fallback(user_library_appids, n_recommendations, user_id)
             
-            logger.info(f"Features importantes: {all_features}")
+            logger.info(f"Features importantes: {top_features}")
             
-            # 3. Buscar na biblioteca do usuário
+            # 3. Buscar na biblioteca do usuário a partir das features 
             library_recs = self._search_in_library_with_features(
                 user_library=user_library,
-                features=all_features,
+                features=top_features,
                 max_hours=self.max_library_hours,
                 n_recommendations=n_recommendations
             )
@@ -101,15 +99,77 @@ class RecommendationAgent:
                 
                 logger.info(f"Retornando {len(final_recs)} recomendações da biblioteca")
                 return final_recs
+
+
+            embedder_dfs = []
+            embedder_df = pd.DataFrame()
+            if len(library_recs) > 0:
+                for rec in library_recs:
+                    df = self.embedder.search_by_game_id(
+                        rec.game_id,
+                        self.games_df,
+                        self.embedder.faiss_index,
+                        top_k=10
+                    )
+
+                    if df is not None and not df.empty:
+                        embedder_dfs.append(df)
+
+            # Junta tudo
+            if embedder_dfs:
+                embedder_df = pd.concat(embedder_dfs, ignore_index=True)
             
-            # 5. Se não encontrou o suficiente, buscar no dataset
-            remaining = n_recommendations - len(library_recs)
-            logger.info(f"Buscando {remaining} jogos no dataset...")
+            if not embedder_df.empty:
+                embedder_df = (
+                    embedder_df
+                    .groupby("appid", as_index=False)
+                    .agg({
+                        "similarity": "max",
+                        "name": "first",
+                        "genres": "first",
+                        "categories": "first",
+                        "positive_ratio": "first",
+                        "price": "first",
+                        "developer": "first",
+                        "distance": "min"
+                    })
+                    .sort_values("similarity", ascending=False)
+                )
+ 
+            recs_embedder = self.build_similarity_recommendations(
+                embedder_df,
+                source_name="semantic_search"
+            )
+
+            # Remover duplicados
+            library_game_ids = {rec.game_id for rec in library_recs}
+            recs_embedder = [
+                rec for rec in recs_embedder
+                if rec.game_id not in library_game_ids
+            ]
+            
+            recs_concat = []
+            remaining_one = n_recommendations-len(library_recs)        
+            if len(recs_embedder)+len(library_recs) >= n_recommendations:
+                sorted_lib_recs = sorted(library_recs, key=lambda x: x.score, reverse=True)
+                sorted_emb_recs = sorted(recs_embedder, key=lambda x: x.score, reverse=True)
+                recs_concat = sorted_lib_recs +  sorted_emb_recs[:remaining_one]
+                
+                res_sorted = sorted(recs_concat, key=lambda x: x.score, reverse=True)
+                for rec in recs_concat:
+                    rec.rationale = self._generate_library_rationale(rec, user_prompt)
+                
+                logger.info(f"Retornando {len(recs_concat)} recomendações do embedding")
+                return recs_concat
+
+            # 5. Se não encontrou o suficiente, busca no dataset
+            remaining_two = n_recommendations - len(recs_concat)
+            logger.info(f"Buscando {remaining_two} jogos no dataset...")
             
             dataset_recs = self._search_in_dataset_with_features(
-                features=all_features,
+                features=top_features,
                 user_library=user_library_appids,
-                n_recommendations=remaining,
+                n_recommendations=remaining_two,
                 user_id=user_id
             )
             
@@ -128,7 +188,7 @@ class RecommendationAgent:
             # Gerar explicações finais
             for rec in all_recs:
                 if rec.rationale == "":
-                    rec.rationale = self._generate_enhanced_rationale(rec, user_prompt, user_id)
+                    rec.rationale = self._generate_enhanced_rationale(rec)
             
             logger.info(f"Recomendações finais: {len(all_recs)} (biblioteca: {len(library_recs)}, dataset: {len(dataset_recs)})")
             
@@ -140,7 +200,46 @@ class RecommendationAgent:
             # Fallback em caso de erro
             return self._get_popular_fallback([], n_recommendations, user_id)
     
-    def _generate_enhanced_rationale(self, recommendation: Recommendation, user_prompt: str, user_id: str = None) -> str:
+    def build_similarity_recommendations(self,
+            similarity_df: pd.DataFrame,
+            source_name: str = "semantic_search"
+        ) -> List[Recommendation]:
+        """
+        Converte DataFrame de similaridade em objetos Recommendation
+        """
+        recommendations = []
+
+        if similarity_df is None or similarity_df.empty:
+            return recommendations
+
+        for _, game_row in similarity_df.iterrows():
+            similarity = float(game_row.get("similarity", 0.0))
+
+            rec = Recommendation(
+                game_id=game_row["appid"],
+                game_name=game_row.get("name", "Desconhecido"),
+                score=similarity,
+                rationale="",
+                source=source_name,
+                metadata={
+                    "similarity": similarity,
+                    "distance": game_row.get("distance", None),
+                    "genres": game_row.get("genres", None),
+                    "categories": game_row.get("categories", None),
+                    "positive_ratio": game_row.get("positive_ratio", 0),
+                    "average_playtime": game_row.get("average_playtime", None),
+                    "price": game_row.get("price", None),
+                    "developer": game_row.get("developer", None),
+                    "game_data": game_row.to_dict()
+                }
+            )
+
+            recommendations.append(rec)
+
+        return recommendations
+
+
+    def _generate_enhanced_rationale(self, recommendation: Recommendation) -> str:
         """
         Gera explicação aprimorada para jogos do dataset
         """
@@ -148,93 +247,11 @@ class RecommendationAgent:
         metadata = recommendation.metadata
         
         if source == "dataset":
-            return self._generate_dataset_rationale(recommendation, user_prompt, user_id)
+            return self._generate_dataset_rationale(recommendation)
         elif source == "popular_fallback":
             return recommendation.rationale
         else:
-            return self._generate_dataset_rationale(recommendation, user_prompt, user_id)
-    
-    def _get_all_important_features(self, prompt_features: Dict) -> List[str]:
-        """
-        Extrai todas as features importantes do prompt
-        
-        Args:
-            prompt_features: Output do PromptInterpreter
-            
-        Returns:
-            Lista de features importantes (mínimo score de 0.5)
-        """
-        if 'features' not in prompt_features:
-            logger.warning("PromptInterpreter não retornou 'features'")
-            return []
-        
-        top_features = prompt_features['features']
-        
-        if not top_features:
-            return []
-        
-        # Filtrar features com score alto (>= 0.5)
-        important_features = []
-        for feature, score in top_features.items():
-            if score >= 0.5:
-                # Normalizar feature (mapear sinônimos)
-                normalized_feature = self._normalize_feature(feature)
-                if normalized_feature:
-                    important_features.append(normalized_feature)
-        
-        # Remover duplicados
-        important_features = list(set(important_features))
-        
-        logger.info(f"Features importantes filtradas: {important_features}")
-        
-        return important_features
-    
-    def _normalize_feature(self, feature: str) -> str:
-        """
-        Normaliza uma feature mapeando sinônimos para termos padrão
-        
-        Args:
-            feature: Feature extraída
-            
-        Returns:
-            Feature normalizada ou None se não for relevante
-        """
-        feature_lower = feature.lower().strip()
-        
-        # Mapeamento de sinônimos para termos padrão
-        feature_mapping = {
-            'rpg': ['rpg', 'role-playing', 'role playing', 'papel'],
-            'mundo aberto': ['mundo aberto', 'open world', 'sandbox', 'livre', 'explorar', 'exploração'],
-            'ação': ['ação', 'action', 'tiro', 'shooter', 'fps', 'combate', 'batalha'],
-            
-            'aventura': ['aventura', 'adventure', 'descoberta', 'viagem'],
-            'terror': ['terror', 'horror', 'assustador', 'medo', 'suspense'],
-            'multijogador': ['multijogador', 'multiplayer', 'coop', 'cooperativo', 'co-op', 'online', 'amigos'],
-
-            'estratégia': ['estratégia', 'strategy', 'tático', 'planejamento', 'cérebro'],
-            'simulação': ['simulação', 'simulation', 'simulador'],
-            'corrida': ['corrida', 'racing', 'carro', 'automobilismo', 'velocidade'],
-
-            'esporte': ['esporte', 'sports', 'futebol', 'basquete', 'fifa', 'nba'],
-            'puzzle': ['puzzle', 'quebra-cabeça', 'lógica', 'enigma'],
-            'indie': ['indie', 'independente'],
-            
-            'casual': ['casual', 'relaxante', 'leve', 'simples', 'fácil', 'rápido'],
-            'competitivo': ['competitivo', 'pvp', 'ranked', 'versus'],
-            'história': ['história', 'story', 'narrativa', 'enredo', 'personagem', 'trama'],
-            
-            'sobrevivência': ['sobrevivência', 'survival', 'crafting', 'sobreviver'],
-            'roguelike': ['roguelike', 'procedural', 'permadeath', 'rogue', 'lite'],
-            'metroidvania': ['metroidvania', 'metroid', 'vania'],
-        }
-        
-        # Verificar se a feature está no mapeamento
-        for key, synonyms in feature_mapping.items():
-            if feature_lower in synonyms or any(syn in feature_lower for syn in synonyms):
-                return key
-        
-        # Se não encontrou mapeamento, retorna a própria feature
-        return feature_lower
+            return self._generate_dataset_rationale(recommendation)
     
     def _search_in_library_with_features(self, 
                                         user_library: List[Dict],
@@ -286,8 +303,7 @@ class RecommendationAgent:
                 best_feature, best_score = self._check_features_in_game_complete(game_row, features)
             
             if best_feature:  # Se encontrou alguma feature
-                # Bônus por ser da biblioteca e pouco jogado
-                library_bonus = 0.3 if game['playtime_hours'] == 0 else 0.1
+                library_bonus = 0.5
                 
                 # Score final
                 final_score = min(best_score + library_bonus, 1.0)
@@ -417,20 +433,20 @@ class RecommendationAgent:
             best_feature, best_score = self._check_features_in_game_complete(game_row, features)
             
             if best_feature and best_score > 0.1:  # Threshold baixo para aceitar
-                # Adicionar bônus por qualidade (do agente antigo)
+                # Adicionar bônus por qualidade (revies positivas)
                 quality_bonus = self._calculate_quality_bonus(game_row)
 
-                # Bônus por popularidade
+                # Bônus por popularidade (muitas reviews)
                 popularity_bonus = self._calculate_popularity_bonus(game_row)
                 
-                # Bônus baseado no perfil
+                # Bônus baseado no perfil do usuario
                 profile_bonus = self._calculate_profile_bonus(game_row['appid'], user_id)
                 
                 # Score final = match_score + quality_bonus (máximo 1.0)
                 final_score = min(best_score + quality_bonus, 1.0)
                 
                 final_score = min(
-                    best_score + quality_bonus + (popularity_bonus * 0.5) + profile_bonus,
+                    best_score + quality_bonus + popularity_bonus + profile_bonus,
                     1.0
                 )
                 
@@ -467,11 +483,11 @@ class RecommendationAgent:
         pos_ratio = game_row.get('positive_ratio', 0)
         
         if pos_ratio >= 90:
-            bonus = 0.3
+            bonus = 0.4
         elif pos_ratio >= 80:
-            bonus = 0.2
+            bonus = 0.3
         elif pos_ratio >= 70:
-            bonus = 0.1
+            bonus = 0.2
         
         return bonus
     
@@ -503,7 +519,7 @@ class RecommendationAgent:
             user_id: ID do usuário
             
         Returns:
-            Bônus de perfil (0.0 a 0.3)
+            Bônus de perfil (0.0 a 0.4)
         """
         try:
             # Verificar se o usuário está no modelo do ProfileAnalyzer
@@ -525,8 +541,8 @@ class RecommendationAgent:
                     if not matching_row.empty:
                         # Extrair score colaborativo (normalizado para 0-1)
                         collab_score = float(matching_row.iloc[0].get('score', 0))
-                        # Converter para bônus (0.0 a 0.3)
-                        return min(collab_score * 0.3, 0.3)
+                        # Converter para bônus (0.0 a 0.4)
+                        return min(collab_score * 0.3, 0.4)
             
         except Exception as e:
             logger.warning(f"Erro ao calcular bônus de perfil: {e}")
@@ -653,7 +669,7 @@ class RecommendationAgent:
         )
         return rationale    
     
-    def _generate_dataset_rationale(self, recommendation: Recommendation, user_prompt: str, user_id: str = None) -> str:
+    def _generate_dataset_rationale(self, recommendation: Recommendation) -> str:
         """
         Gera explicação detalhada para jogos do dataset
         """

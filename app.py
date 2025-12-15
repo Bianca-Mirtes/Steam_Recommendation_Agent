@@ -175,6 +175,7 @@ def load_models():
     try:
         # Carregar dados processados
         games_df = pd.read_pickle("data/processed/games_processed.pkl")
+        interaction_df = pd.read_pickle("data/processed/interactions_processed.pkl")
         
         # Carregar embeddings
         from src.game_embedder import GameEmbedder
@@ -182,10 +183,9 @@ def load_models():
         embedder.load_all("data/embeddings")
         
         # Carregar modelo de perfil
-        from src.profile_analyzer import ProfileAnalyzer
-        analyzer = ProfileAnalyzer()
-        with open("models/profile_model.pkl", "rb") as f:
-            analyzer = pickle.load(f)
+        from src.profile_analyzer_deep import DeepProfileAnalyzer
+        analyzer = DeepProfileAnalyzer()
+        analyzer.load_model("models/deep_profile_model.pkl")
         
         # Carregar interpretador de prompt
         from src.prompt_interpreter import PromptInterpreter
@@ -195,13 +195,15 @@ def load_models():
         from src.steam_api_client import SteamAPI
         steam_api = SteamAPI()
         
-        # Carregar AGENTE SIMPLIFICADO
+        # Carregar AGENTE
         from src.agent import RecommendationAgent
         
         agent = RecommendationAgent(
             profile_analyzer=analyzer,
             prompt_interpreter=interpreter,
+            embedder=embedder,
             games_df=games_df,
+            interactions_df=interaction_df,
             steam_api=steam_api
         )
         
@@ -209,12 +211,14 @@ def load_models():
             'games_df': games_df,
             'embedder': embedder,
             'analyzer': analyzer,
+            'embedder': embedder,
             'interpreter': interpreter,
             'steam_api': steam_api,
             'agent': agent
         }
     except Exception as e:
         st.error(f"Erro ao carregar modelos: {e}")
+        
 
 def create_user_profile_form():
     st.markdown('<h3 class="sub-header">🔗 Conectar à Sua Conta Steam</h3>', 

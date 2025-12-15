@@ -42,27 +42,52 @@ class SteamDataPreprocessor:
             ]
             print(f"  Filtrados para {len(games_clean)} jogos com >{min_total_reviews} reviews e >{min_positive_ratio}% positivos")
         
-        # 3. Processar gêneros e categorias
+        # 3. Processar gêneros e categorias (GARANTIR QUE EXISTAM PARA DEEP LEARNING)
         if 'genres' in games_clean.columns:
+            games_clean['genres'] = games_clean['genres'].fillna('').astype(str)
             games_clean['genres_list'] = games_clean['genres'].apply(
-                lambda x: x.split(';') if pd.notna(x) else []
+                lambda x: x.split(';') if pd.notna(x) and x != '' else []
             )
+        else:
+            games_clean['genres'] = ''
+            games_clean['genres_list'] = []
+            print("  Aviso: Coluna 'genres' não encontrada - criando coluna vazia")
         
         if 'categories' in games_clean.columns:
+            games_clean['categories'] = games_clean['categories'].fillna('').astype(str)
             games_clean['categories_list'] = games_clean['categories'].apply(
-                lambda x: x.split(';') if pd.notna(x) else []
+                lambda x: x.split(';') if pd.notna(x) and x != '' else []
             )
         
-        # 4. Extrair ano de lançamento
+        # 4. Garantir que temos colunas necessárias para Deep Learning
+        # positive_ratio (já calculado acima)
+        if 'positive_ratio' not in games_clean.columns:
+            games_clean['positive_ratio'] = 70  # Valor padrão
+        
+        # price
+        if 'price' not in games_clean.columns:
+            if 'price_final' in games_clean.columns:
+                games_clean['price'] = games_clean['price_final']
+            elif 'price_original' in games_clean.columns:
+                games_clean['price'] = games_clean['price_original']
+            else:
+                games_clean['price'] = 0
+                print("  Aviso: Coluna 'price' não encontrada - definindo como 0")
+        
+        # Garantir tipos numéricos
+        games_clean['positive_ratio'] = pd.to_numeric(games_clean['positive_ratio'], errors='coerce').fillna(70)
+        games_clean['price'] = pd.to_numeric(games_clean['price'], errors='coerce').fillna(0)
+        
+        # 5. Extrair ano de lançamento
         if 'release_date' in games_clean.columns:
             games_clean['release_year'] = pd.to_datetime(
                 games_clean['release_date'], errors='coerce'
             ).dt.year
         
-        # 5. Criar texto combinado para embeddings
+        # 6. Criar texto combinado para embeddings
         games_clean['combined_text'] = games_clean.apply(self._combine_game_text, axis=1)
         
-        # 6. Criar features numéricas normalizadas
+        # 7. Criar features numéricas normalizadas
         numeric_features = []
         
         if 'positive_ratio' in games_clean.columns:
@@ -83,29 +108,35 @@ class SteamDataPreprocessor:
             )
             numeric_features.append('price_norm')
         
-        # 7. Criar one-hot encoding para gêneros principais
-        if 'genres_list' in games_clean.columns:
+        # 8. Criar one-hot encoding para gêneros principais
+        if 'genres_list' in games_clean.columns and len(games_clean['genres_list'].iloc[0]) > 0:
             # Encontrar gêneros mais comuns
             all_genres = []
             for genres in games_clean['genres_list']:
-                all_genres.extend(genres)
+                if isinstance(genres, list):
+                    all_genres.extend(genres)
             
-            genre_counts = pd.Series(all_genres).value_counts()
-            top_genres = genre_counts.head(20).index.tolist()
-            
-            for genre in top_genres:
-                games_clean[f'genre_{genre}'] = games_clean['genres_list'].apply(
-                    lambda x: 1 if genre in x else 0
-                )
-                numeric_features.append(f'genre_{genre}')
+            if all_genres:
+                genre_counts = pd.Series(all_genres).value_counts()
+                top_genres = genre_counts.head(20).index.tolist()
+                
+                for genre in top_genres:
+                    col_name = f'genre_{genre.replace(" ", "_").lower()}'
+                    games_clean[col_name] = games_clean['genres_list'].apply(
+                        lambda x: 1 if isinstance(x, list) and genre in x else 0
+                    )
+                    numeric_features.append(col_name)
         
         print(f"✓ Jogos pré-processados: {len(games_clean)}")
         print(f"  Features numéricas: {len(numeric_features)}")
+        print(f"  Metadados para Deep Learning: genres, positive_ratio, price")
         
         return {
             'games': games_clean,
             'numeric_features': numeric_features,
-            'game_ids': games_clean['appid'].tolist()
+            'game_ids': games_clean['appid'].tolist(),
+            # Adicionar metadados específicos para Deep Learning
+            'metadata_columns': ['genres', 'positive_ratio', 'price']
         }
     
     def _combine_game_text(self, row):
@@ -167,39 +198,56 @@ class SteamDataPreprocessor:
         print(f"  Usuários ativos: {len(active_users)}")
         print(f"  Jogos populares: {len(popular_games)}")
         
-        # 3. Criar matriz de interações
+        # 3. Criar implicit_rating para Deep Learning
+        # Baseado em horas jogadas, compras, etc.
+        if 'hours_played' in interactions.columns:
+            # Normalizar horas jogadas para rating 1-5
+            max_hours = interactions['hours_played'].max()
+            if max_hours > 0:
+                # Log scale para normalizar distribuição long tail
+                interactions['implicit_rating'] = interactions['hours_played'].apply(
+                    lambda x: 1.0 + 4.0 * (np.log1p(x) / np.log1p(max_hours)) if x > 0 else 1.0
+                )
+            else:
+                interactions['implicit_rating'] = 2.5  # Valor médio
+        elif 'purchase' in interactions.columns:
+            # Se temos dados de compra
+            interactions['implicit_rating'] = interactions['purchase'].apply(
+                lambda x: 5.0 if x == 1 else 1.0
+            )
+        else:
+            # Se não temos horas ou compras, criar rating baseado em contagem
+            interactions['implicit_rating'] = 3.0  # Valor padrão
+        
+        # Garantir que o rating esteja entre 1-5
+        interactions['implicit_rating'] = interactions['implicit_rating'].clip(1.0, 5.0)
+        
+        # 4. Criar matriz de interações
         user_encoder = LabelEncoder()
         game_encoder = LabelEncoder()
         
         interactions['user_encoded'] = user_encoder.fit_transform(interactions['user_id'])
         interactions['game_encoded'] = game_encoder.fit_transform(interactions['appid'])
         
-        # 4. Criar matriz esparsa de interações
+        # 5. Criar matriz esparsa de interações (com ratings)
         n_users = len(user_encoder.classes_)
         n_games = len(game_encoder.classes_)
         
+        # Para Deep Learning, vamos criar uma matriz com os ratings
         interaction_matrix = np.zeros((n_users, n_games), dtype=np.float32)
         
         for _, row in tqdm(interactions.iterrows(), total=len(interactions), desc="Criando matriz"):
             u = row['user_encoded']
             g = row['game_encoded']
+            rating = row['implicit_rating']
             
-            # Usar horas jogadas como peso
-            if 'hours_played' in row and row['hours_played'] > 0:
-                weight = np.log1p(row['hours_played']) / 10  # Normalizar
-                weight = min(weight, 1.0)  # Limitar a 1
-            else:
-                weight = 0.1  # Peso mínimo para interações sem horas
-            
-            interaction_matrix[u, g] = weight
-        
-        # 5. Normalizar por usuário (opcional)
-        # user_norms = np.linalg.norm(interaction_matrix, axis=1, keepdims=True)
-        # user_norms[user_norms == 0] = 1
-        # interaction_matrix = interaction_matrix / user_norms
+            interaction_matrix[u, g] = rating
         
         print(f"✓ Matriz de interações: {interaction_matrix.shape}")
         print(f"  Densidade: {(interaction_matrix > 0).sum() / (n_users * n_games):.4%}")
+        print(f"  Ratings: min={interaction_matrix[interaction_matrix > 0].min():.2f}, "
+              f"max={interaction_matrix.max():.2f}, "
+              f"avg={interaction_matrix[interaction_matrix > 0].mean():.2f}")
         
         return {
             'matrix': interaction_matrix,
@@ -208,80 +256,6 @@ class SteamDataPreprocessor:
             'raw_interactions': interactions,
             'n_users': n_users,
             'n_games': n_games
-        }
-    
-    def create_hybrid_features(self, games_processed, interactions_processed):
-        """Cria features híbridas combinando conteúdo e colaborativo"""
-        print("Criando features híbridas...")
-        
-        games_df = games_processed['games']
-        interaction_matrix = interactions_processed['matrix']
-        game_encoder = interactions_processed['game_encoder']
-        
-        # 1. Mapear appid para índice na matriz
-        game_idx_to_appid = dict(enumerate(game_encoder.classes_))
-        appid_to_game_idx = {appid: idx for idx, appid in game_idx_to_appid.items()}
-        
-        # 2. Extrair features de conteúdo dos jogos
-        game_features = []
-        game_ids = []
-        
-        for appid in tqdm(game_encoder.classes_, desc="Extraindo features de jogos"):
-            game_data = games_df[games_df['appid'] == appid]
-            
-            if len(game_data) == 0:
-                continue
-            
-            row = game_data.iloc[0]
-            features = []
-            
-            # Adicionar features numéricas
-            for feat in games_processed['numeric_features']:
-                if feat in row:
-                    features.append(float(row[feat]))
-            
-            # Adicionar texto combinado (para TF-IDF depois)
-            if 'combined_text' in row:
-                features.append(row['combined_text'])
-            
-            game_features.append(features)
-            game_ids.append(appid)
-        
-        # 3. Criar TF-IDF para texto dos jogos
-        if any(isinstance(feat, str) for feat in game_features[0] if len(game_features) > 0):
-            texts = []
-            numeric_features = []
-            
-            for features in game_features:
-                text = ""
-                numeric = []
-                for feat in features:
-                    if isinstance(feat, str):
-                        text += " " + feat
-                    else:
-                        numeric.append(feat)
-                texts.append(text.strip())
-                numeric_features.append(numeric)
-            
-            # Criar embeddings TF-IDF
-            tfidf = TfidfVectorizer(max_features=100, stop_words='english')
-            text_embeddings = tfidf.fit_transform(texts).toarray()
-            
-            # Combinar com features numéricas
-            hybrid_features = []
-            for i, numeric in enumerate(numeric_features):
-                hybrid = list(numeric) + list(text_embeddings[i])
-                hybrid_features.append(hybrid)
-        else:
-            hybrid_features = game_features
-        
-        print(f"✓ Features híbridas criadas: {len(hybrid_features)} jogos")
-        print(f"  Dimensão por jogo: {len(hybrid_features[0]) if hybrid_features else 0}")
-        
-        return {
-            'game_features': np.array(hybrid_features, dtype=np.float32),
-            'game_ids': game_ids,
-            'game_idx_mapping': appid_to_game_idx
         }
     
     def create_training_pairs(self, interactions_processed, n_negatives=4):
@@ -305,7 +279,8 @@ class SteamDataPreprocessor:
                 'user_idx': u,
                 'game_idx': g,
                 'label': 1,
-                'weight': weight
+                'weight': weight,
+                'rating': weight  # Para Deep Learning
             })
         
         # Amostrar pares negativos
@@ -335,7 +310,8 @@ class SteamDataPreprocessor:
                         'user_idx': u,
                         'game_idx': g,
                         'label': 0,
-                        'weight': 0.1  # Peso menor para negativos
+                        'weight': 0.1,  # Peso menor para negativos
+                        'rating': 1.0  # Rating mínimo para negativos
                     })
         
         # Combinar e embaralhar
@@ -367,13 +343,7 @@ def create_training_dataset(unified_data, output_dir="processed"):
         min_game_interactions=10
     )
     
-    # 3. Criar features híbridas
-    hybrid_features = preprocessor.create_hybrid_features(
-        games_processed,
-        interactions_processed
-    )
-    
-    # 4. Criar pares de treinamento
+    # 3. Criar pares de treinamento
     training_pairs = preprocessor.create_training_pairs(
         interactions_processed,
         n_negatives=4
@@ -384,7 +354,7 @@ def create_training_dataset(unified_data, output_dir="processed"):
     # Salvar dados processados
     joblib.dump(games_processed, f'{output_dir}/games_processed.joblib')
     joblib.dump(interactions_processed, f'{output_dir}/interactions_processed.joblib')
-    joblib.dump(hybrid_features, f'{output_dir}/hybrid_features.joblib')
+    
     training_pairs.to_csv(f'{output_dir}/training_pairs.csv', index=False)
     
     print(f"\n✅ Dados salvos em: {output_dir}/")
@@ -392,6 +362,5 @@ def create_training_dataset(unified_data, output_dir="processed"):
     return {
         'games_processed': games_processed,
         'interactions_processed': interactions_processed,
-        'hybrid_features': hybrid_features,
         'training_pairs': training_pairs
     }
